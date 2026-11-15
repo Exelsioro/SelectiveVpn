@@ -27,7 +27,7 @@ public static class PipeRpc
     public static async Task<RpcResponse> CallAsync(RpcRequest request, CancellationToken cancellationToken = default)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(70));
+        timeout.CancelAfter(TimeSpan.FromSeconds(request.Command == "refresh" ? 160 : 70));
         await using var pipe = new NamedPipeClientStream(".", Wire.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
         await pipe.ConnectAsync(2500, timeout.Token);
         VerifyServer(pipe.SafePipeHandle);

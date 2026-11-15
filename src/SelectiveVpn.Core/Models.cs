@@ -6,6 +6,7 @@ namespace SelectiveVpn.Core;
 public enum RuleKind { Application, Domain, DomainSuffix, IpCidr }
 public enum RouteTarget { Direct, Vpn }
 public enum TunnelState { Starting, Disconnected, Connecting, Connected, Faulted, Stopping }
+public enum VpnProtocol { Auto, VlessReality, OpenVpnUdp, OpenVpnTcp, OpenVpnXorUdp, OpenVpnXorTcp }
 
 public sealed record RoutingRule
 {
@@ -21,6 +22,9 @@ public sealed record ClientSettings
     public int SchemaVersion { get; init; } = 1;
     public bool AutoConnect { get; set; }
     public string? SelectedServerId { get; set; }
+    public VpnProtocol Protocol { get; set; } = VpnProtocol.Auto;
+    public string? LastSuccessfulServerId { get; set; }
+    public VpnProtocol? LastSuccessfulProtocol { get; set; }
     public RouteTarget DefaultRoute { get; set; } = RouteTarget.Direct;
     public List<RoutingRule> Rules { get; set; } = [];
     [JsonIgnore]
@@ -29,14 +33,23 @@ public sealed record ClientSettings
 }
 
 public sealed record ServerProfile(string Id, string Name, string Address, int Port, string Uuid,
-    string PublicKey, string ShortId, string ServerName, string Fingerprint, string Flow);
-public sealed record ServerInfo(string Id, string Name, string Address, int Port)
+    string PublicKey, string ShortId, string ServerName, string Fingerprint, string Flow)
 {
-    [JsonIgnore] public string DisplayName => $"{Name} — {Address}:{Port}";
+    public int? PoolId { get; init; }
+    public string? Country { get; init; }
+    public Dictionary<VpnProtocol, string> OpenVpnConfigs { get; init; } = [];
+    public string AccessUser { get; init; } = "";
+    public string AccessKey { get; init; } = "";
+    [JsonIgnore] public VpnProtocol[] Protocols => (Uuid.Length > 0 ? new[] { VpnProtocol.VlessReality } : []).Concat(OpenVpnConfigs.Keys).ToArray();
+}
+public sealed record ServerInfo(string Id, string Name, string Address, int Port, VpnProtocol[]? Protocols = null)
+{
+    [JsonIgnore] public string DisplayName => Address.Length == 0 ? Name : $"{Name} — {Address}:{Port}";
 }
 public sealed record StatusSnapshot(TunnelState State, string Message, bool ProtectionActive,
     int ProtectedApplications, ClientSettings Settings, ServerInfo[] Servers, string[] Events);
-public sealed record RpcRequest(string Command, ClientSettings? Settings = null, string? ImportJson = null, string? ServerId = null);
+public sealed record RpcRequest(string Command, ClientSettings? Settings = null, string? ImportJson = null, string? ServerId = null, VpnProtocol? Protocol = null);
+public sealed record ProviderSettings(string ConnectionKeyBase64);
 public sealed record RpcResponse(bool Success, string? Error = null, StatusSnapshot? Status = null);
 
 public static class Wire

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -19,7 +20,7 @@ public partial class MainWindow : Window
     }
     private readonly ObservableCollection<RuleRow> rows = [];
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(3) };
-    private bool busy, loading, initialized, dirty;
+    private bool busy, loading, initialized, dirty, serviceOperation;
     private ClientSettings current = new();
 
     public MainWindow()
@@ -29,6 +30,7 @@ public partial class MainWindow : Window
         var targets = new[] { new Option<RouteTarget>(RouteTarget.Vpn, "Через VPN"), new(RouteTarget.Direct, "Напрямую") };
         TargetBox.ItemsSource = targets; DefaultBox.ItemsSource = targets;
         KindBox.SelectedIndex = 0; TargetBox.SelectedIndex = 0;
+        ProtocolBox.ItemsSource = new[] { new Option<VpnProtocol>(VpnProtocol.Auto, "Авто — перебор доступных протоколов"), new(VpnProtocol.VlessReality, "VLESS / REALITY"), new(VpnProtocol.OpenVpnUdp, "OpenVPN UDP"), new(VpnProtocol.OpenVpnTcp, "OpenVPN TCP"), new(VpnProtocol.OpenVpnXorUdp, "OpenVPN XOR UDP"), new(VpnProtocol.OpenVpnXorTcp, "OpenVPN XOR TCP") };
         RulesGrid.ItemsSource = rows;
         Loaded += async (_, _) => { await RefreshAsync(); timer.Start(); };
         timer.Tick += async (_, _) => await RefreshAsync();
@@ -48,8 +50,9 @@ public partial class MainWindow : Window
         if (busy) return false;
         busy = true;
         ServersBox.IsEnabled = false;
-        if (request.Command != "status") ControlRoot.IsEnabled = false;
+        ProtocolBox.IsEnabled = false;
         SaveButton.IsEnabled = false;
+        RuleEditor.IsEnabled = RuleActions.IsEnabled = false;
         try
         {
             var response = await PipeRpc.CallAsync(request);
@@ -65,11 +68,11 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            StatusText.Text = request.Command == "status" ? "Служба недоступна. Установите и запустите SelectiveVpn через Install.ps1. Сохранённые блокировки приложений остаются в Windows." : ex.Message;
+            StatusText.Text = request.Command == "status" ? "Служба остановлена или недоступна. Нажмите «Запустить службу». Защищённые приложения остаются заблокированными." : ex.Message;
             if (showError) MessageBox.Show(ex.Message, "SelectiveVpn", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-        finally { busy = false; ControlRoot.IsEnabled = true; ServersBox.IsEnabled = initialized; SaveButton.IsEnabled = initialized; }
+        finally { RuleEditor.IsEnabled = RuleActions.IsEnabled = true; busy = false; ProtocolBox.IsEnabled = initialized; ServersBox.IsEnabled = initialized; SaveButton.IsEnabled = initialized; }
     }
     private void LoadSettings(StatusSnapshot status)
     {
@@ -77,6 +80,8 @@ public partial class MainWindow : Window
         current = Wire.Clone(status.Settings);
         rows.Clear(); foreach (var rule in current.Rules) rows.Add(new(rule));
         ServersBox.ItemsSource = status.Servers; ServersBox.SelectedValue = current.SelectedServerId;
+        if (ServersBox.SelectedValue is null) ServersBox.SelectedValue = "recommended";
+        ProtocolBox.SelectedValue = current.Protocol;
         DefaultBox.SelectedValue = current.DefaultRoute; AutoConnectBox.IsChecked = current.AutoConnect;
         initialized = true; loading = false; dirty = false; SetTitle();
     }
@@ -85,6 +90,7 @@ public partial class MainWindow : Window
         SelectedServerId = ServersBox.SelectedValue as string,
         DefaultRoute = DefaultBox.SelectedValue is RouteTarget target ? target : RouteTarget.Direct,
         AutoConnect = AutoConnectBox.IsChecked == true,
+        Protocol = ProtocolBox.SelectedValue is VpnProtocol protocol ? protocol : VpnProtocol.Auto,
         Rules = rows.Select(r => r.Rule).ToList()
     });
     private async Task<bool> SaveAsync()
@@ -96,6 +102,43 @@ public partial class MainWindow : Window
     private async void Connect_Click(object sender, RoutedEventArgs e)
     { if (!initialized || busy) return; if (dirty && !await SaveAsync()) return; await InvokeAsync(new("connect")); }
     private async void Disconnect_Click(object sender, RoutedEventArgs e) => await InvokeAsync(new("disconnect"));
+    private async void Protocol_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (loading || !initialized || busy || ProtocolBox.SelectedValue is not VpnProtocol protocol || protocol == current.Protocol) return;
+        var previous = current.Protocol;
+        if (await InvokeAsync(new("select-protocol", Protocol: protocol))) current.Protocol = protocol;
+        else { loading = true; ProtocolBox.SelectedValue = previous; loading = false; }
+    }
+    private async void StopService_Click(object sender, RoutedEventArgs e)
+    {
+        if (serviceOperation) return;
+        serviceOperation = true;
+        StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = false;
+        try { await ServiceControl.StopAsync(); StatusText.Text = "Служба остановлена. TUN выключен; блокировки выбранных приложений сохранены."; }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Остановка службы"); }
+        finally { serviceOperation = false; StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = true; }
+    }
+    private async void StartService_Click(object sender, RoutedEventArgs e)
+    {
+        if (serviceOperation) return;
+        serviceOperation = true;
+        StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = false;
+        try { await ServiceControl.StartAsync(); await RefreshAsync(); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Запуск службы"); }
+        finally { serviceOperation = false; StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = true; }
+    }
+    private async void RefreshServers_Click(object sender, RoutedEventArgs e)
+    {
+        if (busy) return;
+        if (dirty && !await SaveAsync()) return;
+        await InvokeAsync(new("refresh"), reload: true);
+    }
+    private void OpenLog_Click(object sender, RoutedEventArgs e)
+    {
+        var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SelectiveVpn", "service.log");
+        try { var info = new ProcessStartInfo("notepad.exe") { UseShellExecute = true }; info.ArgumentList.Add(path); Process.Start(info); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "Журнал"); }
+    }
     private async void Server_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (loading || !initialized || busy || ServersBox.SelectedValue is not string id || id == current.SelectedServerId) return;

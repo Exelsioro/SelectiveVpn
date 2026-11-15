@@ -8,6 +8,12 @@
     </DockPanel>
     <Border Grid.Row="1" Background="White" Padding="16" CornerRadius="8" Margin="0,0,0,16">
       <StackPanel>
+        <WrapPanel Margin="0,0,0,12">
+          <Button x:Name="StartServiceButton" Content="Запустить службу" Click="StartService_Click"/>
+          <Button x:Name="StopServiceButton" Content="Остановить службу" Click="StopService_Click"/>
+          <Button Content="Обновить серверы" Click="RefreshServers_Click"/>
+          <Button Content="Открыть журнал" Click="OpenLog_Click"/>
+        </WrapPanel>
         <TextBlock x:Name="StatusText" Text="Подключение к службе…" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,12"/>
         <DockPanel>
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="12,0,0,0">
@@ -16,9 +22,10 @@
           <ComboBox x:Name="ServersBox" DisplayMemberPath="DisplayName" SelectedValuePath="Id" SelectionChanged="Server_Changed" ToolTip="Выбор сохраняется автоматически. При подключённом VPN сервер переключается сразу."/>
         </DockPanel>
         <TextBlock Text="Выбранный сервер сохраняется автоматически" Foreground="#526074" FontSize="12" Margin="0,8,0,0"/>
+        <DockPanel Margin="0,10,0,0"><TextBlock Text="Протокол: " VerticalAlignment="Center"/><ComboBox x:Name="ProtocolBox" DisplayMemberPath="Label" SelectedValuePath="Value" SelectionChanged="Protocol_Changed"/></DockPanel>
       </StackPanel>
     </Border>
-    <StackPanel Grid.Row="2" Margin="0,0,0,12">
+    <StackPanel x:Name="RuleEditor" Grid.Row="2" Margin="0,0,0,12">
       <DockPanel Margin="0,0,0,12">
         <TextBlock Text="Правила маршрутизации" FontWeight="SemiBold" FontSize="19"/>
         <CheckBox x:Name="AutoConnectBox" Content="Подключать при запуске службы" HorizontalAlignment="Right" Checked="Changed" Unchecked="Changed"/>
@@ -41,7 +48,7 @@
         <DataGridCheckBoxColumn Header="Включено" Binding="{Binding Rule.Enabled}" Width="90"/>
       </DataGrid.Columns>
     </DataGrid>
-    <Grid Grid.Row="4" Margin="0,12,0,12">
+    <Grid x:Name="RuleActions" Grid.Row="4" Margin="0,12,0,12">
       <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <StackPanel Orientation="Horizontal"><Button Content="Удалить" Click="Remove_Click"/><Button Content="Вкл / выкл" Click="Toggle_Click"/><Button Content="↑" Click="Up_Click"/><Button Content="↓" Click="Down_Click"/></StackPanel>
       <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="8,0,16,0"><TextBlock Text="Остальной трафик: " VerticalAlignment="Center"/><ComboBox x:Name="DefaultBox" Width="130" DisplayMemberPath="Label" SelectedValuePath="Value" SelectionChanged="Changed"/></StackPanel>

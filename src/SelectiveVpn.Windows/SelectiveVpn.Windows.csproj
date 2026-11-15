@@ -2,5 +2,6 @@
   <ItemGroup>
     <ProjectReference Include="../SelectiveVpn.Core/SelectiveVpn.Core.csproj" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.0" />
   </ItemGroup>
 </Project>

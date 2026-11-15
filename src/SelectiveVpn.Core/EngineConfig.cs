@@ -6,7 +6,7 @@ public sealed record ProbeEndpoint(int Port, string Username, string Password);
 
 public static class EngineConfig
 {
-    public static JsonObject Build(ClientSettings rawSettings, ServerProfile? server, bool online, ProbeEndpoint probe, bool tun = true)
+    public static JsonObject Build(ClientSettings rawSettings, ServerProfile? server, bool online, ProbeEndpoint probe, bool tun = true, string? physicalInterface = null, string? vpnInterface = null)
     {
         var settings = Policy.Normalize(rawSettings);
         if (online && server is null) throw new ArgumentException("Выберите сервер.");
@@ -15,8 +15,8 @@ public static class EngineConfig
         {
             ["type"] = "tun", ["tag"] = "tun-in", ["interface_name"] = Wire.InterfaceName,
             ["address"] = new JsonArray("172.30.251.1/30", "fdfe:dcba:9876::1/126"),
-            ["auto_route"] = true, ["strict_route"] = true, ["stack"] = "mixed", ["mtu"] = 1400,
-            ["dns_mode"] = "hijack"
+            ["auto_route"] = true, ["strict_route"] = false, ["stack"] = "mixed", ["mtu"] = 1400,
+            ["dns_mode"] = "native"
         });
         inbounds.Add(new JsonObject
         {
@@ -24,7 +24,13 @@ public static class EngineConfig
             ["users"] = new JsonArray(new JsonObject { ["username"] = probe.Username, ["password"] = probe.Password })
         });
         var outbounds = new JsonArray(new JsonObject { ["type"] = "direct", ["tag"] = "direct" });
-        if (online) outbounds.Add(new JsonObject
+        if (physicalInterface is not null) outbounds[0]!["bind_interface"] = physicalInterface;
+        if (online && vpnInterface is not null) outbounds.Add(new JsonObject
+        {
+            ["type"] = "direct", ["tag"] = "vpn", ["bind_interface"] = vpnInterface,
+            ["domain_resolver"] = new JsonObject { ["server"] = "dns-vpn", ["strategy"] = "ipv4_only" }
+        });
+        else if (online) outbounds.Add(new JsonObject
         {
             ["type"] = "vless", ["tag"] = "vpn", ["server"] = server!.Address, ["server_port"] = server.Port,
             ["uuid"] = server.Uuid, ["flow"] = server.Flow,
@@ -35,6 +41,18 @@ public static class EngineConfig
                 ["reality"] = new JsonObject { ["enabled"] = true, ["public_key"] = server.PublicKey, ["short_id"] = server.ShortId }
             }
         });
+        if (online && vpnInterface is null && physicalInterface is not null) outbounds[^1]!["bind_interface"] = physicalInterface;
+        if (tun && server is not null)
+        {
+            var exclusions = new JsonArray();
+            var addresses = new List<string> { server.Address };
+            foreach (var config in server.OpenVpnConfigs.Values)
+                foreach (var line in config.Split('\n').Where(l => l.StartsWith("remote ")))
+                    addresses.Add(line.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1]);
+            foreach (string address in addresses.Distinct())
+                if (System.Net.IPAddress.TryParse(address, out var ip)) exclusions.Add(address + (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? "/32" : "/128"));
+            inbounds[0]!["route_exclude_address"] = exclusions;
+        }
         var rules = new JsonArray
         {
             new JsonObject { ["action"] = "sniff", ["timeout"] = "300ms" },
@@ -59,6 +77,7 @@ public static class EngineConfig
             new JsonObject { ["type"] = "fakeip", ["tag"] = "fakeip", ["inet4_range"] = "198.18.0.0/15", ["inet6_range"] = "fc00::/18" }
         };
         if (online) dnsServers.Add(new JsonObject { ["type"] = "https", ["tag"] = "dns-vpn", ["server"] = "1.1.1.1", ["path"] = "/dns-query", ["detour"] = "vpn" });
+        if (physicalInterface is not null) dnsServers[0]!["bind_interface"] = physicalInterface;
         return new JsonObject
         {
             ["log"] = new JsonObject { ["level"] = "warn", ["timestamp"] = true },

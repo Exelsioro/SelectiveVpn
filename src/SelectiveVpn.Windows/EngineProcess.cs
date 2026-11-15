@@ -19,14 +19,16 @@ public sealed class EngineProcess : IDisposable
     private Process? process;
     private IntPtr job;
     private ProbeEndpoint? probe;
+    private string lastError = "";
     public bool Running => process is { HasExited: false };
 
     public EngineProcess(string executable, SecureStore store, Action<string> log)
     { this.executable = executable; this.store = store; this.log = log; }
 
-    public async Task StartAsync(ClientSettings settings, ServerProfile? server, bool online, CancellationToken ct)
+    public async Task StartAsync(ClientSettings settings, ServerProfile? server, bool online, CancellationToken ct, bool tun = true, string? physicalInterface = null, string? vpnInterface = null)
     {
         Stop();
+        lastError = "";
         using (var file = File.OpenRead(executable))
             if (!Convert.ToHexString(SHA256.HashData(file)).Equals(ExpectedSha256, StringComparison.Ordinal))
                 throw new InvalidDataException("SHA256 сетевого движка не совпадает с проверенной версией.");
@@ -36,7 +38,7 @@ public sealed class EngineProcess : IDisposable
         listener.Stop();
         probe = new(port, "health", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)));
         var configPath = Path.Combine(store.Root, "engine.json");
-        store.Write("engine.json", Encoding.UTF8.GetBytes(EngineConfig.Build(settings, server, online, probe).ToJsonString()));
+        store.Write("engine.json", Encoding.UTF8.GetBytes(EngineConfig.Build(settings, server, online, probe, tun, physicalInterface, vpnInterface).ToJsonString()));
         var checkInfo = StartInfo("check", configPath);
         using (var check = Process.Start(checkInfo) ?? throw new InvalidOperationException("Engine check failed to start."))
         {
@@ -56,15 +58,27 @@ public sealed class EngineProcess : IDisposable
             process = Process.Start(StartInfo("run", configPath)) ?? throw new InvalidOperationException("Engine failed to start.");
             if (!Job.AssignProcessToJobObject(job, process.Handle)) throw new Win32Exception(Marshal.GetLastWin32Error());
             process.OutputDataReceived += (_, _) => { };
-            // Raw engine messages may include destination addresses and credentials. Do not expose them over RPC.
-            process.ErrorDataReceived += (_, e) => { if (!string.IsNullOrEmpty(e.Data)) log("Сетевой движок сообщил предупреждение; подробности доступны при диагностическом запуске."); };
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (string.IsNullOrWhiteSpace(e.Data)) return;
+                var line = SafeError(e.Data, server);
+                if (probe is not null) line = line.Replace(probe.Password, "<credential>", StringComparison.Ordinal);
+                lastError = line;
+                try { store.AppendLog("engine.log", line); } catch (IOException) { }
+                log("Движок: " + line);
+            };
             process.BeginOutputReadLine(); process.BeginErrorReadLine();
             var until = DateTime.UtcNow.AddSeconds(12);
             while (DateTime.UtcNow < until)
             {
                 ct.ThrowIfCancellationRequested();
-                if (!Running) throw new InvalidOperationException("Сетевой движок завершился при запуске.");
-                if (NetworkInterface.GetAllNetworkInterfaces().Any(n => n.Name == Wire.InterfaceName && n.OperationalStatus == OperationalStatus.Up)) return;
+                if (!Running) throw new InvalidOperationException("Сетевой движок завершился: " + lastError);
+                if (!tun)
+                {
+                    try { using var ready = new TcpClient(); await ready.ConnectAsync(IPAddress.Loopback, port, ct); return; }
+                    catch (SocketException) { }
+                }
+                else if (NetworkInterface.GetAllNetworkInterfaces().Any(n => n.Name == Wire.InterfaceName && n.OperationalStatus == OperationalStatus.Up)) return;
                 await Task.Delay(200, ct);
             }
             throw new TimeoutException("TUN-интерфейс не появился.");
@@ -95,11 +109,12 @@ public sealed class EngineProcess : IDisposable
         info.ArgumentList.Add(command); info.ArgumentList.Add("-c"); info.ArgumentList.Add(config);
         return info;
     }
-    private static string SafeError(string error, ServerProfile? server)
+    public static string SafeError(string error, ServerProfile? server)
     {
+        error = System.Text.RegularExpressions.Regex.Replace(error, @"\x1B\[[0-?]*[ -/]*[@-~]", "");
         if (server is not null)
-            foreach (var secret in new[] { server.Uuid, server.PublicKey, server.ShortId })
-                if (!string.IsNullOrEmpty(secret)) error = error.Replace(secret, "<credential>", StringComparison.Ordinal);
+            foreach (var secret in new[] { server.Uuid, server.PublicKey, server.AccessKey })
+                if (secret.Length >= 8) error = error.Replace(secret, "<credential>", StringComparison.Ordinal);
         return error.Length > 700 ? error[..700] : error;
     }
     public void Stop()

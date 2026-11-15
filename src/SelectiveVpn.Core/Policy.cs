@@ -8,7 +8,7 @@ public static class Policy
 {
     public static ClientSettings Normalize(ClientSettings input)
     {
-        if (input.SchemaVersion != 1 || !Enum.IsDefined(input.DefaultRoute)) throw new ArgumentException("Неподдерживаемая версия настроек.");
+        if (input.SchemaVersion != 1 || !Enum.IsDefined(input.DefaultRoute) || !Enum.IsDefined(input.Protocol)) throw new ArgumentException("Неподдерживаемая версия настроек или протокол.");
         var result = Wire.Clone(input);
         if (result.Rules is null || result.Rules.Count > 1000) throw new ArgumentException("Допустимо до 1000 правил.");
         var identities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

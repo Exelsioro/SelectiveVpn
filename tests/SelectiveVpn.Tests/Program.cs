@@ -15,6 +15,70 @@ if (args.Length >= 2 && args[0] == "--guard-host")
     await Task.Delay(Timeout.Infinite);
     return;
 }
+if (args.Contains("--transport-check"))
+{
+    var repo = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../"));
+    var store = new SecureStore(Path.Combine(repo, "private", "transport-check"));
+    var provider = System.Text.Json.JsonSerializer.Deserialize<ProviderSettings>(await File.ReadAllTextAsync(Path.Combine(repo, "private", "provider-bootstrap.json")), Wire.Json)!;
+    var profiles = args.Contains("--cached") ? store.LoadServers() : await new PlanetCatalog(provider).RefreshAsync(Console.WriteLine, CancellationToken.None);
+    store.SaveServers(profiles);
+    foreach (var p in profiles) Console.WriteLine($"CATALOG {p.Id} {p.Country} {string.Join(',', p.Protocols)}");
+    var physical = await HostNetwork.GetPhysicalAsync(CancellationToken.None);
+    using var transport = new OpenVpnProcess(Path.Combine(repo, "runtime", "openvpn", "openvpn.exe"), store, Console.WriteLine);
+    using var checkEngine = new EngineProcess(Path.Combine(repo, "runtime", "sing-box.exe"), store, Console.WriteLine);
+    var server = profiles.First();
+    foreach (var protocol in server.Protocols)
+    {
+        try
+        {
+            string? vpn = null;
+            if (protocol != VpnProtocol.VlessReality) { await transport.StartAsync(server, protocol, physical, CancellationToken.None); vpn = OpenVpnProcess.InterfaceName; }
+            await checkEngine.StartAsync(new(), server, true, CancellationToken.None, tun: false, physicalInterface: physical.Name, vpnInterface: vpn);
+            Console.WriteLine($"RESULT {protocol} HTTPS={await checkEngine.ProbeAsync(CancellationToken.None)}");
+        }
+        catch (Exception ex) { Console.WriteLine($"RESULT {protocol} ERROR={ex.Message}"); }
+        finally { checkEngine.Stop(); transport.Stop(); await HostNetwork.CleanupOwnRoutesAsync(); }
+    }
+    return;
+}
+if (args.Contains("--service-check"))
+{
+    async Task<StatusSnapshot> Request(RpcRequest request)
+    {
+        var response = await PipeRpc.CallAsync(request);
+        if (!response.Success) throw new Exception(response.Error);
+        Console.WriteLine($"SERVICE {request.Command}: {response.Status!.State} {response.Status.Message}");
+        return response.Status!;
+    }
+    var status = await Request(new("status"));
+    Console.WriteLine("LOCATIONS " + string.Join(", ", status.Servers.Select(s => s.Name)));
+    if (status.State != TunnelState.Disconnected) throw new Exception("Service should start disconnected for this validation.");
+    if (System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces().Any(n => n.Name == Wire.InterfaceName && n.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)) throw new Exception("Idle service created TUN.");
+    await Request(new("select-server", ServerId: "pool-54"));
+    await Request(new("select-protocol", Protocol: VpnProtocol.OpenVpnTcp));
+    await ServiceControl.StopAsync(); Console.WriteLine("SERVICE SCM stopped");
+    await ServiceControl.StartAsync(); await Task.Delay(5000);
+    status = await Request(new("status"));
+    if (status.Settings.SelectedServerId != "pool-54" || status.Settings.Protocol != VpnProtocol.OpenVpnTcp) throw new Exception("Selection was lost after service restart.");
+    Console.WriteLine("SERVICE server and protocol persisted");
+    await Request(new("select-server", ServerId: "recommended"));
+    await Request(new("select-protocol", Protocol: VpnProtocol.Auto));
+    await Request(new("connect"));
+    for (int i = 0; i < 45; i++)
+    {
+        await Task.Delay(1000); status = await Request(new("status"));
+        if (status.State is TunnelState.Faulted or TunnelState.Connected) break;
+    }
+    bool full = args.Contains("--full");
+    if (full && status.State != TunnelState.Connected) throw new Exception("Full connection did not succeed.");
+    if (!full && status.State != TunnelState.Faulted) throw new Exception("Expected a clear rejection while original VPN is active.");
+    await Request(new("disconnect"));
+    await ServiceControl.StopAsync(); Console.WriteLine("SERVICE SCM stopped after connect attempt");
+    await ServiceControl.StartAsync(); await Task.Delay(5000);
+    await Request(new("status"));
+    Console.WriteLine("SERVICE CHECK PASSED");
+    return;
+}
 int passed = 0;
 void Check(bool condition, string name) { if (!condition) throw new Exception("FAILED: " + name); Console.WriteLine("PASS " + name); passed++; }
 void Reject(Action action, string name) { try { action(); } catch (ArgumentException) { Check(true, name); return; } throw new Exception("FAILED: accepted " + name); }
@@ -59,6 +123,32 @@ async Task CheckEngine(JsonObject config, string name)
     File.Delete(path);
 }
 await CheckEngine(offline, "offline"); await CheckEngine(online, "online");
+var bound = EngineConfig.Build(settings, sample, true, probe, tun: false, physicalInterface: "Ethernet");
+Check(bound["inbounds"]!.AsArray().All(n => n!["type"]!.ToString() != "tun"), "preflight cannot install a TUN");
+Check(bound["outbounds"]![0]!["bind_interface"]!.ToString() == "Ethernet" && bound["outbounds"]![1]!["bind_interface"]!.ToString() == "Ethernet", "both direct and VLESS sockets bind physical interface");
+await CheckEngine(bound, "preflight-bound");
+await CheckEngine(EngineConfig.Build(settings, sample, true, probe, vpnInterface: "SelectiveVpn-OpenVPN", physicalInterface: "Ethernet"), "openvpn-bound");
+var ovpnText = "client\ndev tun\nproto udp\nremote 192.0.2.10 4430\npersist-tun\n<ca>\nTEST CERTIFICATE\n</ca>\n";
+Check(!OpenVpnConfiguration.Validate(ovpnText).Contains("persist-tun"), "OpenVPN does not retain disconnected TUN");
+foreach (string unsafeDirective in new[] { "up evil.exe", "plugin evil.dll", "config external.ovpn", "<connection>" })
+{
+    try { OpenVpnConfiguration.Validate(ovpnText + unsafeDirective); throw new Exception("FAILED unsafe OpenVPN directive accepted"); }
+    catch (InvalidDataException) { Check(true, "reject OpenVPN " + unsafeDirective); }
+}
+var syntheticKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+using (var aes = System.Security.Cryptography.Aes.Create())
+{
+    aes.Key = syntheticKey; aes.GenerateIV();
+    string iv = Convert.ToBase64String(aes.IV);
+    string value = Convert.ToBase64String(aes.EncryptCbc(System.Text.Encoding.UTF8.GetBytes("{\"data\":{\"node_id\":123}}"), aes.IV));
+    string mac = Convert.ToHexString(System.Security.Cryptography.HMACSHA256.HashData(syntheticKey, System.Text.Encoding.UTF8.GetBytes(iv + value))).ToLowerInvariant();
+    string Encode(string signature) => new JsonObject { ["payload"] = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(new JsonObject { ["iv"] = iv, ["value"] = value, ["mac"] = signature }.ToJsonString())) }.ToJsonString();
+    Check(PlanetApiCodec.Decode(Encode(mac), Convert.ToBase64String(syntheticKey))["data"]!["node_id"]!.GetValue<int>() == 123, "authenticated API envelope decrypted");
+    try { PlanetApiCodec.Decode(Encode(new string('0', 64)), Convert.ToBase64String(syntheticKey)); throw new Exception("FAILED invalid MAC accepted"); }
+    catch (InvalidDataException) { Check(true, "tampered API envelope rejected"); }
+}
+var roundtrip = System.Text.Json.JsonSerializer.Deserialize<ClientSettings>(System.Text.Json.JsonSerializer.Serialize(new ClientSettings { SelectedServerId = "recommended", Protocol = VpnProtocol.OpenVpnXorTcp }, Wire.Json), Wire.Json)!;
+Check(roundtrip.SelectedServerId == "recommended" && roundtrip.Protocol == VpnProtocol.OpenVpnXorTcp, "recommended selection and protocol serialize together");
 var importedFile = Path.Combine(root, "private", "decoded-payload.json");
 if (File.Exists(importedFile))
 {
@@ -77,7 +167,7 @@ if (args.Contains("--wfp"))
         store.SaveServers([sample]);
         var reopened = new SecureStore(storePath);
         Check(reopened.LoadSettings().SelectedServerId == "planet-persisted-selection" && reopened.LoadSettings().AutoConnect, "selected server and autoconnect survive store reopen");
-        Check(reopened.LoadServers().Single() == sample, "DPAPI profiles survive store reopen");
+        Check(System.Text.Json.JsonSerializer.Serialize(reopened.LoadServers().Single(), Wire.Json) == System.Text.Json.JsonSerializer.Serialize(sample, Wire.Json), "DPAPI profiles survive store reopen");
         Check(!System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(Path.Combine(storePath, "servers.dpapi"))).Contains(sample.Uuid), "persisted profile credentials are encrypted");
     }
     finally
