@@ -9,14 +9,19 @@ internal static class Program
     private static int passed;
     private static void Check(bool condition, string text) { if (!condition) throw new Exception(text); passed++; Console.WriteLine("PASS " + text); }
     private static object Field(object obj, string name) => obj.GetType().GetField(name, BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(obj)!;
-    [STAThread] private static int Main()
+    [STAThread] private static int Main(string[] args)
     {
         int code=1;
         var app=new Application { ShutdownMode=ShutdownMode.OnExplicitShutdown };
-        var window=new MainWindow(); window.Show();
+        var window=new MainWindow(); window.StartInTray();
         app.Dispatcher.InvokeAsync(async () => {
             try {
                 await Task.Delay(1000);
+                Check(!window.IsVisible, "Startup in tray never shows the WPF window");
+                var startupIcon=(Forms.NotifyIcon)Field(Field(window,"tray"),"icon");
+                Check(startupIcon.Visible,"Hidden startup creates visible tray icon");
+                typeof(Forms.NotifyIcon).GetMethod("OnDoubleClick",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(startupIcon,[EventArgs.Empty]);
+                Check(window.IsVisible,"First double click opens hidden-start window");
                 var input=(TextBox)window.FindName("ValueBox"); input.Text="unsaved-tray.example";
                 typeof(MainWindow).GetField("dirty", BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(window,true);
                 window.Close();
@@ -47,6 +52,19 @@ internal static class Program
                 typeof(MainWindow).GetField("dirty",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(window,false);
                 typeof(MainWindow).GetMethod("ExitFromTray",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(window,null);
                 Check(!actualIcon.Visible,"Exit removes tray icon");
+                if (args.Contains("--startup-task")) {
+                    var startupType=typeof(MainWindow).Assembly.GetType("SelectiveVpn.App.InterfaceStartup")!;
+                    var read=startupType.GetMethod("IsEnabledAsync")!;
+                    var write=startupType.GetMethod("SetEnabledAsync")!;
+                    bool original=await (Task<bool>)read.Invoke(null,null)!;
+                    if (!original) {
+                        try {
+                            await (Task)write.Invoke(null,[true])!;
+                            Check(await (Task<bool>)read.Invoke(null,null)!, "Logon task registered for current user");
+                        } finally { await (Task)write.Invoke(null,[false])!; }
+                        Check(!await (Task<bool>)read.Invoke(null,null)!, "Logon task removed and original disabled state restored");
+                    }
+                }
                 Console.WriteLine($"{passed} tray checks passed; no connect/disconnect commands sent to service."); code=0;
             } catch(Exception ex) {Console.Error.WriteLine(ex);}
             finally {app.Shutdown();}

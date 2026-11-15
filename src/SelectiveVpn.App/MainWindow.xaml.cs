@@ -57,10 +57,7 @@ public partial class MainWindow : Window
         KindBox.SelectedIndex = 0; TargetBox.SelectedIndex = 0;
         ProtocolBox.ItemsSource = new[] { new Option<VpnProtocol>(VpnProtocol.Auto, "Авто — перебор доступных протоколов"), new(VpnProtocol.VlessReality, "VLESS / REALITY"), new(VpnProtocol.OpenVpnUdp, "OpenVPN UDP"), new(VpnProtocol.OpenVpnTcp, "OpenVPN TCP"), new(VpnProtocol.OpenVpnXorUdp, "OpenVPN XOR UDP"), new(VpnProtocol.OpenVpnXorTcp, "OpenVPN XOR TCP") };
         RulesGrid.ItemsSource = rows;
-        Loaded += async (_, _) => {
-            tray ??= new TrayController(ShowFromTray, ConnectFromTray, () => Disconnect_Click(this, new RoutedEventArgs()), ExitFromTray);
-            UpdateTray(); await RefreshAsync(); timer.Start();
-        };
+        Loaded += async (_, _) => await InitializeTrayAsync();
         Application.Current.SessionEnding += (_, _) => { systemEnding = true; exitRequested = true; };
         timer.Tick += async (_, _) => await RefreshAsync();
         Closing += (_, e) =>
@@ -73,6 +70,37 @@ public partial class MainWindow : Window
             }
         };
         Closed += (_, _) => { timer.Stop(); lifetime.Cancel(); pollingCancel?.Cancel(); tray?.Dispose(); };
+    }
+    private bool trayInitialized, readingStartup;
+    public async void StartInTray() => await InitializeTrayAsync();
+    private async Task InitializeTrayAsync()
+    {
+        if (trayInitialized) return;
+        trayInitialized = true;
+        tray = new TrayController(ShowFromTray, ConnectFromTray, () => Disconnect_Click(this, new RoutedEventArgs()), ExitFromTray);
+        UpdateTray();
+        var startupRead = LoadInterfaceStartupAsync();
+        await RefreshAsync(); timer.Start();
+        await startupRead;
+    }
+    private async Task LoadInterfaceStartupAsync()
+    {
+        readingStartup = true; InterfaceStartupBox.IsEnabled = false;
+        try { InterfaceStartupBox.IsChecked = await InterfaceStartup.IsEnabledAsync(); }
+        catch (Exception ex) { InterfaceStartupBox.ToolTip = "Не удалось прочитать автозапуск: " + ex.Message; }
+        finally { readingStartup = false; InterfaceStartupBox.IsEnabled = true; }
+    }
+    private async void InterfaceStartup_Changed(object sender, RoutedEventArgs e)
+    {
+        if (readingStartup || !trayInitialized) return;
+        bool enabled = InterfaceStartupBox.IsChecked == true;
+        InterfaceStartupBox.IsEnabled = false;
+        try { await InterfaceStartup.SetEnabledAsync(enabled); }
+        catch (Exception ex) {
+            readingStartup = true; InterfaceStartupBox.IsChecked = !enabled; readingStartup = false;
+            MessageBox.Show(this, ex.Message, "Автозапуск интерфейса");
+        }
+        finally { InterfaceStartupBox.IsEnabled = true; }
     }
     private void ApplyStatus(StatusSnapshot status)
     {

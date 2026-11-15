@@ -23,6 +23,7 @@ public partial class App : Application
             return;
         }
         MainWindow = window;
-        window.Show();
+        if (e.Args.Contains("--tray")) window.StartInTray();
+        else window.Show();
     }
 }

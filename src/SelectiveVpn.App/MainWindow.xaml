@@ -14,6 +14,7 @@
           <Button Content="Обновить серверы" Click="RefreshServers_Click"/>
           <Button Content="Открыть журнал" Click="OpenLog_Click"/>
         </WrapPanel>
+        <CheckBox x:Name="InterfaceStartupBox" Content="Запускать интерфейс при входе в Windows сразу в трей" Checked="InterfaceStartup_Changed" Unchecked="InterfaceStartup_Changed" ToolTip="Для текущего пользователя. Сохраняется сразу; не включает VPN автоматически." Margin="0,0,0,10"/>
         <TextBlock x:Name="StatusText" Text="Подключение к службе…" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,12"/>
         <TextBlock x:Name="ConnectionStatsText" TextWrapping="Wrap" Foreground="#526074" Margin="0,0,0,8"/>
         <DockPanel>

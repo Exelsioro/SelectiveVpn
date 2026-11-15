@@ -1,7 +1,8 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 param([switch]$RemoveApplicationBlocks)
 $ErrorActionPreference = 'Stop'
 $destination = Join-Path $env:ProgramFiles 'SelectiveVpn'
+Get-ScheduledTask -TaskName 'SelectiveVpn.UI.*' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
 $service = Get-Service -Name SelectiveVpn -ErrorAction SilentlyContinue
 if ($service) {
     Stop-Service -Name SelectiveVpn -Force
