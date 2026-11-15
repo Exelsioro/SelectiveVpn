@@ -3,6 +3,8 @@
 [CmdletBinding()]
 param(
     [ValidateRange(30,600)][int]$ConnectionTimeoutSeconds = 180,
+    [string]$ServerId = "pool-54",
+    [switch]$SkipReconnectTest,
     [switch]$CheckOnly,
     [switch]$Recover,
     [switch]$Watchdog,
@@ -164,6 +166,7 @@ function Restore-AndStop {
     $original=[IO.File]::ReadAllText((Join-Path $script:run 'original-settings.json'))
     $offline=$original | ConvertFrom-Json
     $offline.autoConnect=$false
+    $offline | Add-Member -NotePropertyName ConnectOnLogon -NotePropertyValue $false -Force
     Stop-TestService
     Write-Settings ($offline | ConvertTo-Json -Depth 32 -Compress)
     try {
@@ -197,6 +200,38 @@ function Probe($Exe, $Label, $Url, $Family='-4') {
         Write-Json "$Label.json" $result
         return $result
     } finally { $proc.Dispose() }
+}
+function Probe-Repeated($Exe,$Label,$Url) {
+    $samples=@()
+    foreach($i in 1..3) {
+        $samples+=Probe $Exe "$Label-$i" $Url
+        if($i -lt 3) {Start-Sleep -Seconds 1}
+    }
+    Write-Json "$Label-samples.json" $samples
+    $answer=$samples[0].PSObject.Copy()
+    $answer.success=(@($samples | Where-Object {!$_.success}).Count -eq 0 -and @($samples.ip | Select-Object -Unique).Count -eq 1)
+    return $answer
+}
+function Test-Reconnection {
+    $before=Rpc @{command='status'}
+    $expected=Join-Path (Split-Path $serviceExe) 'runtime\sing-box.exe'
+    $engines=@(Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq $expected})
+    if($engines.Count -ne 1) {throw 'Expected exactly one installed SelectiveVpn engine; crash test refused'}
+    Event "Intentional engine crash test: pid=$($engines[0].ProcessId)"
+    Stop-Process -Id $engines[0].ProcessId -Force
+    Check-Blocked 'Blocked during engine failure'
+    $until=[DateTime]::UtcNow.AddSeconds($ConnectionTimeoutSeconds)
+    do {
+        $status=Rpc @{command='status'}
+        Write-Json 'reconnection-status.json' $status
+        if($status.state -eq 'Connected' -and $status.connection.successfulConnections -gt $before.connection.successfulConnections) {break}
+        if([DateTime]::UtcNow -ge $until) {throw 'Automatic reconnection did not complete before deadline'}
+        Start-Sleep -Seconds 2
+    } while($true)
+    Assert-Check 'Automatic reconnection counters' ($status.connection.failures -gt $before.connection.failures -and $status.connection.reconnectAttempts -gt $before.connection.reconnectAttempts -and $null -ne $status.connection.lastReconnectedAt) 'Failure, retry and successful reconnection observed'
+    $vpn=Probe-Repeated $script:vpnProbe 'reconnected-protected' 'https://1.1.1.1/cdn-cgi/trace'
+    $direct=Probe-Repeated $script:directProbe 'reconnected-direct' 'https://1.1.1.1/cdn-cgi/trace'
+    Assert-Check 'Traffic after automatic reconnection' ($vpn.success -and $direct.success -and $vpn.ip -ne $direct.ip) 'Three consecutive HTTPS samples on each route'
 }
 function Check-Blocked($Label) {
     $control=Probe $script:directProbe "$Label-control" 'https://1.1.1.1/cdn-cgi/trace'
@@ -297,13 +332,16 @@ try {
         $script:testSettings=$original | ConvertFrom-Json
         $script:preservedBlocks=@($script:testSettings.rules | Where-Object { $_.enabled -and $_.kind -eq 'Application' -and $_.target -eq 'Vpn' })
         $script:testSettings.autoConnect=$false
-        $script:testSettings.selectedServerId='recommended'
+        $script:testSettings.selectedServerId=$ServerId
+        $script:testSettings | Add-Member -NotePropertyName DiagnosticLogging -NotePropertyValue $true -Force
+        $script:testSettings | Add-Member -NotePropertyName ConnectOnLogon -NotePropertyValue $false -Force
         $script:testSettings.protocol='Auto'
         $script:testSettings.defaultRoute='Direct'
         $script:testSettings.rules=@($script:preservedBlocks)
         Write-Settings ($script:testSettings | ConvertTo-Json -Depth 32 -Compress)
         $s=Start-TestService
         Write-Json 'initial-status.json' $s
+        if ($null -eq $s.connection) {throw 'Installed service lacks connection statistics; update it before this test'}
         Assert-Check 'Idle service' ($s.state -eq 'Disconnected') $s.message
         Assert-Check 'No idle TUN' (@(Get-NetAdapter | Where-Object { $_.Name -eq 'SelectiveVpn-TUN' -and $_.Status -eq 'Up' }).Count -eq 0) 'No active SelectiveVpn-TUN expected'
         $script:directProbe=Join-Path $script:run 'direct-probe.exe'
@@ -323,21 +361,22 @@ try {
         $null=Rpc @{command='connect'}
         Wait-Connected 'Initial connection'
         Snapshot 'connected'
-        $vpn=Probe $script:vpnProbe 'connected-protected' 'https://1.1.1.1/cdn-cgi/trace'
-        $direct=Probe $script:directProbe 'connected-direct' 'https://1.1.1.1/cdn-cgi/trace'
+        $vpn=Probe-Repeated $script:vpnProbe 'connected-protected' 'https://1.1.1.1/cdn-cgi/trace'
+        $direct=Probe-Repeated $script:directProbe 'connected-direct' 'https://1.1.1.1/cdn-cgi/trace'
         Assert-Check 'Application VPN route' ($vpn.success -and $vpn.ip -ne $base.ip) 'Protected probe must have a different egress IP than direct baseline'
         Assert-Check 'Default direct route' ($direct.success -and $direct.ip -eq $base.ip) 'Unlisted probe must keep baseline egress IP'
         if (!$vpn.success) { throw 'Connected status did not produce usable application HTTPS' }
+        if (!$SkipReconnectTest) { Test-Reconnection }
         Save-TestRules @($appRule,(Rule 'DomainSuffix' 'cloudflare.com')) 'Domain connection'
-        $viaDomain=Probe $script:directProbe 'domain-route' 'https://www.cloudflare.com/cdn-cgi/trace'
-        $vpnReference=Probe $script:vpnProbe 'domain-reference' 'https://www.cloudflare.com/cdn-cgi/trace'
+        $viaDomain=Probe-Repeated $script:directProbe 'domain-route' 'https://www.cloudflare.com/cdn-cgi/trace'
+        $vpnReference=Probe-Repeated $script:vpnProbe 'domain-reference' 'https://www.cloudflare.com/cdn-cgi/trace'
         Assert-Check 'Domain VPN route' ($viaDomain.success -and $vpnReference.success -and $viaDomain.ip -eq $vpnReference.ip -and $viaDomain.ip -ne $baseDomain.ip) 'Domain-routed probe must match VPN egress, differ from direct'
         Save-TestRules @($appRule,(Rule 'IpCidr' '1.1.1.1/32')) 'IP connection'
-        $viaIp=Probe $script:directProbe 'ip-route' 'https://1.1.1.1/cdn-cgi/trace'
-        $vpnReference=Probe $script:vpnProbe 'ip-reference' 'https://1.1.1.1/cdn-cgi/trace'
+        $viaIp=Probe-Repeated $script:directProbe 'ip-route' 'https://1.1.1.1/cdn-cgi/trace'
+        $vpnReference=Probe-Repeated $script:vpnProbe 'ip-reference' 'https://1.1.1.1/cdn-cgi/trace'
         Assert-Check 'IP VPN route' ($viaIp.success -and $vpnReference.success -and $viaIp.ip -eq $vpnReference.ip -and $viaIp.ip -ne $base.ip) 'CIDR-routed probe must match VPN egress, differ from direct'
         Save-TestRules @($appRule) 'Restore direct connection'
-        $direct=Probe $script:directProbe 'direct-rule-removed' 'https://1.1.1.1/cdn-cgi/trace'
+        $direct=Probe-Repeated $script:directProbe 'direct-rule-removed' 'https://1.1.1.1/cdn-cgi/trace'
         Assert-Check 'Direct route after removing destination rules' ($direct.success -and $direct.ip -eq $base.ip) 'Default direct egress restored'
         $null=Rpc @{command='disconnect'}
         Check-Blocked 'Blocked after disconnect'

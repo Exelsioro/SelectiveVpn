@@ -22,10 +22,19 @@ public sealed class VpnWorker : BackgroundService
     private bool requestedOnline;
     private VpnProtocol activeProtocol;
     private DateTime retryAt;
+    private DateTimeOffset? connectedSince, lastReconnectedAt, lastFailureAt;
+    private string? lastFailure;
+    private int successfulConnections, reconnectAttempts, failures;
+    private double totalConnectedSeconds;
+    private long connectedTimestamp;
+    private HashSet<int> knownSessions = [];
+    private void Failure(string reason) { failures++; lastFailureAt=DateTimeOffset.UtcNow; lastFailure=reason; Log("Сбой: " + reason); }
+
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         serviceToken = stoppingToken;
+        knownSessions = LogonSessions.Read();
         store = new SecureStore();
         settings = store.LoadSettings(); servers = store.LoadServers();
         using var localGuard = guard = new WfpGuard();
@@ -35,7 +44,7 @@ public sealed class VpnWorker : BackgroundService
         await HostNetwork.CleanupOwnRoutesAsync();
         SetState(TunnelState.Disconnected, "VPN отключён; сетевой движок остановлен. Защищённые приложения заблокированы.");
         if (settings.AutoConnect) QueueConnect();
-        try { await Task.WhenAll(ListenAsync(stoppingToken), MonitorAsync(stoppingToken)); }
+        try { await Task.WhenAll(ListenAsync(stoppingToken), MonitorAsync(stoppingToken), MonitorLogonsAsync(stoppingToken)); }
         finally
         {
             connectionCancel?.Cancel();
@@ -108,6 +117,7 @@ public sealed class VpnWorker : BackgroundService
                 break;
             case "save":
                 var next = Policy.Normalize(request.Settings ?? throw new ArgumentException("Нет настроек."));
+                next = next with { LastSuccessfulServerId = settings.LastSuccessfulServerId, LastSuccessfulProtocol = settings.LastSuccessfulProtocol };
                 if (next.SelectedServerId is not (null or "recommended") && !servers.Any(s => s.Id == next.SelectedServerId)) throw new ArgumentException("Сервер не найден.");
                 foreach (var rule in next.Rules.Where(r => r.Enabled && r.Kind == RuleKind.Application))
                 {
@@ -138,6 +148,7 @@ public sealed class VpnWorker : BackgroundService
         connectionCancel?.Cancel(); connectionCancel?.Dispose();
         connectionCancel = CancellationTokenSource.CreateLinkedTokenSource(serviceToken);
         var token = connectionCancel.Token;
+        if (successfulConnections > 0) reconnectAttempts++;
         requestedOnline = true;
         SetState(TunnelState.Connecting, "Подбор и проверка подключения; сеть ещё не переключена");
         connectionTask = Task.Run(async () =>
@@ -147,7 +158,7 @@ public sealed class VpnWorker : BackgroundService
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             { await StopNetworkAsync(); SetState(TunnelState.Disconnected, "Подключение отменено; сетевой движок остановлен"); }
             catch (Exception ex)
-            { await StopNetworkAsync(); retryAt = DateTime.UtcNow.AddSeconds(60); SetState(TunnelState.Faulted, ex.Message); }
+            { Failure(ex.Message); await StopNetworkAsync(); retryAt = DateTime.UtcNow.AddSeconds(60); SetState(TunnelState.Faulted, ex.Message); }
             finally { gate.Release(); }
         }, CancellationToken.None);
     }
@@ -180,12 +191,16 @@ public sealed class VpnWorker : BackgroundService
                     await engine.StartAsync(settings, server, true, ct, tun: true, physicalInterface: physical.Name, vpnInterface: vpnInterface);
                     if (!await engine.ProbeAsync(ct)) throw new IOException("Проверка после запуска TUN не прошла.");
                     guard.OpenTunnel(Wire.InterfaceName); activeProtocol = protocol;
+                    connectedSince = DateTimeOffset.UtcNow;
+                    connectedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (successfulConnections > 0) lastReconnectedAt = connectedSince;
+                    successfulConnections++;
                     settings = settings with { LastSuccessfulServerId = server.Id, LastSuccessfulProtocol = protocol };
                     store.SaveSettings(settings);
                     SetState(TunnelState.Connected, $"Подключено: {server.Name} · {protocol}"); return;
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
-                { Log($"{server.Name} / {protocol}: {EngineProcess.SafeError(ex.Message, server)}"); await StopNetworkAsync(); }
+                { Failure($"{server.Name} / {protocol}: {EngineProcess.SafeError(ex.Message, server)}"); await StopNetworkAsync(); }
             }
         }
         throw new IOException("Серверы и протоколы не прошли проверку. Сеть восстановлена; защищённые приложения заблокированы. Причины — в журнале ниже.");
@@ -194,6 +209,7 @@ public sealed class VpnWorker : BackgroundService
     private async Task StopNetworkAsync()
     {
         guard.CloseTunnel();
+        if (connectedSince is not null) { totalConnectedSeconds += System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds; connectedSince=null; }
         try { engine.Stop(); }
         finally { try { transport.Stop(); } finally { await HostNetwork.CleanupOwnRoutesAsync(); } }
     }
@@ -207,14 +223,30 @@ public sealed class VpnWorker : BackgroundService
             try
             {
                 if (state == TunnelState.Connected && (!engine.Running || (activeProtocol != VpnProtocol.VlessReality && !transport.Running) || !await engine.ProbeAsync(ct)))
-                { await StopNetworkAsync(); SetState(TunnelState.Faulted, "Соединение потеряно; TUN остановлен, защищённые приложения заблокированы."); retryAt = DateTime.UtcNow.AddSeconds(30); }
+                { Failure("Проверка доступности или процесс VPN завершились с ошибкой"); await StopNetworkAsync(); SetState(TunnelState.Faulted, "Соединение потеряно; TUN остановлен, защищённые приложения заблокированы."); retryAt = DateTime.UtcNow.AddSeconds(30); }
                 else if (state == TunnelState.Faulted && requestedOnline && DateTime.UtcNow >= retryAt) QueueConnect();
             }
             finally { gate.Release(); }
         }
     }
+    private async Task MonitorLogonsAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        while (await timer.WaitForNextTickAsync(ct))
+        {
+            HashSet<int> sessions;
+            try { sessions = LogonSessions.Read(); } catch (Exception ex) { Log("Проверка входа в Windows: " + ex.Message); continue; }
+            bool newLogon = sessions.Except(knownSessions).Any(); knownSessions = sessions;
+            if (!newLogon) continue;
+            await gate.WaitAsync(ct);
+            try { if (settings.ConnectOnLogon && !requestedOnline) { Log("Автоподключение: вход пользователя в Windows"); QueueConnect(); } }
+            finally { gate.Release(); }
+        }
+    }
     private StatusSnapshot Snapshot() => new(state, message, guard.Active, settings.ProtectedApplications.Length, Wire.Clone(settings),
-        new[] { new ServerInfo("recommended", "Рекомендуемый — автоматический подбор", "", 0) }.Concat(servers.Select(s => new ServerInfo(s.Id, s.Name, s.Address, s.Port, s.Protocols))).ToArray(), events.ToArray());
+        new[] { new ServerInfo("recommended", "Рекомендуемый — автоматический подбор", "", 0) }.Concat(servers.Select(s => new ServerInfo(s.Id, s.Name, s.Address, s.Port, s.Protocols))).ToArray(), events.ToArray(), new ConnectionStats(connectedSince, lastReconnectedAt, successfulConnections, reconnectAttempts, failures, lastFailureAt, lastFailure,
+            state == TunnelState.Faulted && requestedOnline ? new DateTimeOffset(retryAt, TimeSpan.Zero) : null,
+            totalConnectedSeconds + (connectedSince is null ? 0 : System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds)));
     private void SetState(TunnelState value, string text) { state = value; message = text; Log(text); }
     private void Log(string text)
     {

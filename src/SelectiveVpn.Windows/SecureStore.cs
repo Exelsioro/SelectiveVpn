@@ -45,7 +45,7 @@ public sealed class SecureStore
         lock (logLock)
         {
             var path = Path.Combine(Root, name);
-            if (File.Exists(path) && new FileInfo(path).Length > 1_000_000) File.Move(path, path + ".previous", true);
+            if (File.Exists(path) && new FileInfo(path).Length > (name == "engine.log" ? 20_000_000 : 1_000_000)) File.Move(path, path + ".previous", true);
             File.AppendAllText(path, $"{DateTimeOffset.Now:O} {message}{Environment.NewLine}");
         }
     }

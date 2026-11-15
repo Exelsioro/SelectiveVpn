@@ -57,16 +57,17 @@ public sealed class EngineProcess : IDisposable
         {
             process = Process.Start(StartInfo("run", configPath)) ?? throw new InvalidOperationException("Engine failed to start.");
             if (!Job.AssignProcessToJobObject(job, process.Handle)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            process.OutputDataReceived += (_, _) => { };
-            process.ErrorDataReceived += (_, e) =>
+            DataReceivedEventHandler receive = (_, e) =>
             {
                 if (string.IsNullOrWhiteSpace(e.Data)) return;
                 var line = SafeError(e.Data, server);
                 if (probe is not null) line = line.Replace(probe.Password, "<credential>", StringComparison.Ordinal);
                 lastError = line;
                 try { store.AppendLog("engine.log", line); } catch (IOException) { }
-                log("Движок: " + line);
+                if (line.Contains("ERROR", StringComparison.Ordinal) || line.Contains("FATAL", StringComparison.Ordinal)) log("Движок: " + line);
             };
+            process.OutputDataReceived += receive; process.ErrorDataReceived += receive;
+            store.AppendLog("engine.log", $"START pid={process.Id} tun={tun} server={server?.Id} physical={physicalInterface} vpn={vpnInterface} debug={settings.DiagnosticLogging}");
             process.BeginOutputReadLine(); process.BeginErrorReadLine();
             var until = DateTime.UtcNow.AddSeconds(12);
             while (DateTime.UtcNow < until)

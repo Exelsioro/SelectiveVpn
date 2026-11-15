@@ -15,6 +15,7 @@
           <Button Content="Открыть журнал" Click="OpenLog_Click"/>
         </WrapPanel>
         <TextBlock x:Name="StatusText" Text="Подключение к службе…" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,12"/>
+        <TextBlock x:Name="ConnectionStatsText" TextWrapping="Wrap" Foreground="#526074" Margin="0,0,0,8"/>
         <DockPanel>
           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="12,0,0,0">
             <Button Content="Подключить" Click="Connect_Click"/><Button Content="Отключить" Click="Disconnect_Click"/><Button Content="Импорт серверов" Click="Import_Click"/>
@@ -28,8 +29,9 @@
     <StackPanel x:Name="RuleEditor" Grid.Row="2" Margin="0,0,0,12">
       <DockPanel Margin="0,0,0,12">
         <TextBlock Text="Правила маршрутизации" FontWeight="SemiBold" FontSize="19"/>
-        <CheckBox x:Name="AutoConnectBox" Content="Подключать при запуске службы" HorizontalAlignment="Right" Checked="Changed" Unchecked="Changed"/>
+        <CheckBox x:Name="AutoConnectBox" Content="При запуске службы (включая загрузку Windows)" HorizontalAlignment="Right" Checked="Changed" Unchecked="Changed"/>
       </DockPanel>
+      <WrapPanel Margin="0,0,0,8"><CheckBox x:Name="LogonBox" Content="Подключаться при входе в Windows" Checked="Changed" Unchecked="Changed" Margin="0,0,20,0"/><CheckBox x:Name="DiagnosticsBox" Content="Подробный журнал маршрутизации" Checked="Changed" Unchecked="Changed"/></WrapPanel>
       <TextBlock Text="Приложения «Через VPN» блокируются без VPN. Приоритет: приложения → домены → IP. Внутри группы действует первое совпадение." TextWrapping="Wrap" Foreground="#526074" Margin="0,0,0,12"/>
       <Grid>
         <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

@@ -60,7 +60,7 @@ public static class EngineConfig
             WithTarget(new JsonObject { ["inbound"] = "probe-in" }, RouteTarget.Vpn, online)
         };
         if (settings.ProtectedApplications.Length > 0)
-            rules.Add(new JsonObject { ["process_path_regex"] = new JsonArray(".+"), ["invert"] = true, ["action"] = "reject" });
+            rules.Add(WithTarget(new JsonObject { ["process_path_regex"] = new JsonArray(".+"), ["invert"] = true }, RouteTarget.Vpn, online));
         foreach (var rule in Policy.Ordered(settings))
         {
             var field = rule.Kind switch { RuleKind.Application => "process_path_regex", RuleKind.Domain => "domain", RuleKind.DomainSuffix => "domain_suffix", _ => "ip_cidr" };
@@ -69,7 +69,7 @@ public static class EngineConfig
         }
         // Resolve unmatched domains before IP rules, so CIDR policies also apply to DNS names.
         var firstIp = rules.Select((n, i) => (n, i)).FirstOrDefault(x => x.n?["ip_cidr"] is not null);
-        if (firstIp.n is not null) rules.Insert(firstIp.i, new JsonObject { ["action"] = "resolve", ["server"] = online ? "dns-vpn" : "dns-direct" });
+        if (firstIp.n is not null) rules.Insert(firstIp.i, new JsonObject { ["domain_regex"] = new JsonArray(".+"), ["action"] = "resolve", ["server"] = online ? "dns-vpn" : "dns-direct" });
         rules.Add(WithTarget(new JsonObject(), settings.DefaultRoute, online));
         var dnsServers = new JsonArray
         {
@@ -80,7 +80,7 @@ public static class EngineConfig
         if (physicalInterface is not null) dnsServers[0]!["bind_interface"] = physicalInterface;
         return new JsonObject
         {
-            ["log"] = new JsonObject { ["level"] = "warn", ["timestamp"] = true },
+            ["log"] = new JsonObject { ["level"] = settings.DiagnosticLogging ? "debug" : "info", ["timestamp"] = true },
             ["experimental"] = new JsonObject { ["cache_file"] = new JsonObject { ["enabled"] = tun, ["path"] = "cache.db", ["store_fakeip"] = true } },
             ["dns"] = new JsonObject
             {

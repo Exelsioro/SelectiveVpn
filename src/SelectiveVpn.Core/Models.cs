@@ -21,6 +21,8 @@ public sealed record ClientSettings
 {
     public int SchemaVersion { get; init; } = 1;
     public bool AutoConnect { get; set; }
+    public bool ConnectOnLogon { get; set; }
+    public bool DiagnosticLogging { get; set; }
     public string? SelectedServerId { get; set; }
     public VpnProtocol Protocol { get; set; } = VpnProtocol.Auto;
     public string? LastSuccessfulServerId { get; set; }
@@ -47,7 +49,8 @@ public sealed record ServerInfo(string Id, string Name, string Address, int Port
     [JsonIgnore] public string DisplayName => Address.Length == 0 ? Name : $"{Name} — {Address}:{Port}";
 }
 public sealed record StatusSnapshot(TunnelState State, string Message, bool ProtectionActive,
-    int ProtectedApplications, ClientSettings Settings, ServerInfo[] Servers, string[] Events);
+    int ProtectedApplications, ClientSettings Settings, ServerInfo[] Servers, string[] Events, ConnectionStats? Connection = null);
+public sealed record ConnectionStats(DateTimeOffset? ConnectedSince, DateTimeOffset? LastReconnectedAt, int SuccessfulConnections, int ReconnectAttempts, int Failures, DateTimeOffset? LastFailureAt, string? LastFailure, DateTimeOffset? NextRetryAt, double TotalConnectedSeconds);
 public sealed record RpcRequest(string Command, ClientSettings? Settings = null, string? ImportJson = null, string? ServerId = null, VpnProtocol? Protocol = null);
 public sealed record ProviderSettings(string ConnectionKeyBase64);
 public sealed record RpcResponse(bool Success, string? Error = null, StatusSnapshot? Status = null);

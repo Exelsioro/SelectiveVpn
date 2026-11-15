@@ -47,6 +47,13 @@ public partial class MainWindow : Window
     private void ApplyStatus(StatusSnapshot status)
     {
         if (StatusText.Text != status.Message) StatusText.Text = status.Message;
+        if (status.Connection is { } connection)
+        {
+            string Age(DateTimeOffset? date) => date is null ? "—" : TimeSpan.FromSeconds(Math.Max(0, (DateTimeOffset.UtcNow-date.Value).TotalSeconds)).ToString(@"d\.hh\:mm\:ss");
+            ConnectionStatsText.Text = $"Подключены: {Age(connection.ConnectedSince)} · Последнее переподключение: {Age(connection.LastReconnectedAt)} назад\nЗа запуск службы: подключений {connection.SuccessfulConnections}, попыток переподключения {connection.ReconnectAttempts}, сбоев {connection.Failures}, всего в VPN {TimeSpan.FromSeconds(connection.TotalConnectedSeconds):d\\.hh\\:mm\\:ss}" +
+                (connection.LastFailure is null ? "" : $" · Последний сбой: {connection.LastFailureAt?.ToLocalTime():HH:mm:ss} — {connection.LastFailure}") +
+                (connection.NextRetryAt is null ? "" : $" · Следующая попытка: {connection.NextRetryAt.Value.ToLocalTime():HH:mm:ss}");
+        }
         var protection = status.ProtectionActive ? $"Защищено приложений: {status.ProtectedApplications}" : "Защита не подтверждена";
         if (ProtectionText.Text != protection) ProtectionText.Text = protection;
         var events = string.Join(Environment.NewLine, status.Events.Reverse());
@@ -126,7 +133,7 @@ public partial class MainWindow : Window
         ServersBox.ItemsSource = status.Servers; ServersBox.SelectedValue = current.SelectedServerId;
         if (ServersBox.SelectedValue is null) ServersBox.SelectedValue = "recommended";
         ProtocolBox.SelectedValue = current.Protocol;
-        DefaultBox.SelectedValue = current.DefaultRoute; AutoConnectBox.IsChecked = current.AutoConnect;
+        DefaultBox.SelectedValue = current.DefaultRoute; AutoConnectBox.IsChecked = current.AutoConnect; LogonBox.IsChecked = current.ConnectOnLogon; DiagnosticsBox.IsChecked = current.DiagnosticLogging;
         initialized = true; loading = false; dirty = false; SetTitle();
     }
     private ClientSettings ReadSettings() => Policy.Normalize(current with
@@ -134,6 +141,8 @@ public partial class MainWindow : Window
         SelectedServerId = ServersBox.SelectedValue as string,
         DefaultRoute = DefaultBox.SelectedValue is RouteTarget target ? target : RouteTarget.Direct,
         AutoConnect = AutoConnectBox.IsChecked == true,
+        ConnectOnLogon = LogonBox.IsChecked == true,
+        DiagnosticLogging = DiagnosticsBox.IsChecked == true,
         Protocol = ProtocolBox.SelectedValue is VpnProtocol protocol ? protocol : VpnProtocol.Auto,
         Rules = rows.Select(r => r.Rule).ToList()
     });

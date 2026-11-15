@@ -102,7 +102,7 @@ var offlineRules = offline["route"]!["rules"]!.AsArray();
 Check(offlineRules.First(n => n?["process_path_regex"] != null && n?["invert"] == null)!["action"]!.ToString() == "reject", "VPN app rejects when offline");
 Check(offline["outbounds"]!.AsArray().All(o => o!["tag"]!.ToString() != "vpn"), "offline has no VPN fallback outbound");
 Check(online["route"]!["rules"]!.AsArray().First(n => n?["process_path_regex"] != null && n?["invert"] == null)!["outbound"]!.ToString() == "vpn", "online app uses VPN exclusively");
-Check(online["route"]!["rules"]!.AsArray().Any(n => n?["invert"]?.GetValue<bool>() == true && n?["action"]?.ToString() == "reject"), "unattributed traffic fails closed with protected apps");
+Check(online["route"]!["rules"]!.AsArray().Any(n => n?["invert"]?.GetValue<bool>() == true && n?["outbound"]?.ToString() == "vpn"), "unattributed traffic uses VPN, never direct, with protected apps");
 Check(offlineRules.Any(n => n?["domain"] != null && n["outbound"]?.ToString() == "direct"), "direct domain stays direct offline");
 Check(online["inbounds"]![0]!["address"]!.AsArray().Count == 2, "TUN includes IPv4 and IPv6");
 Check(EngineConfig.Build(new() { DefaultRoute = RouteTarget.Vpn }, null, false, probe)["route"]!["rules"]!.AsArray().Last()!["action"]!.ToString() == "reject", "VPN default route fails closed");
@@ -149,6 +149,11 @@ using (var aes = System.Security.Cryptography.Aes.Create())
 }
 var roundtrip = System.Text.Json.JsonSerializer.Deserialize<ClientSettings>(System.Text.Json.JsonSerializer.Serialize(new ClientSettings { SelectedServerId = "recommended", Protocol = VpnProtocol.OpenVpnXorTcp }, Wire.Json), Wire.Json)!;
 Check(roundtrip.SelectedServerId == "recommended" && roundtrip.Protocol == VpnProtocol.OpenVpnXorTcp, "recommended selection and protocol serialize together");
+Check(online["route"]!["rules"]!.AsArray().Where(n => n?["action"]?.ToString() == "resolve").All(n => n?["domain_regex"] is not null), "numeric destinations bypass DNS resolve action before CIDR");
+await CheckEngine(EngineConfig.Build(settings with { DiagnosticLogging = true }, sample, true, probe), "debug-routing");
+Check(EngineConfig.Build(settings with { DiagnosticLogging = true }, sample, true, probe)["log"]!["level"]!.ToString() == "debug", "diagnostic routing verbosity enabled");
+var logonSettings = Wire.Clone(new ClientSettings { ConnectOnLogon=true, AutoConnect=false, DiagnosticLogging=true });
+Check(logonSettings.ConnectOnLogon && !logonSettings.AutoConnect && logonSettings.DiagnosticLogging, "logon and service startup settings remain independent");
 var importedFile = Path.Combine(root, "private", "decoded-payload.json");
 if (File.Exists(importedFile))
 {
