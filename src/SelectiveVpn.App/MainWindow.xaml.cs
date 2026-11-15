@@ -26,6 +26,27 @@ public partial class MainWindow : Window
     private CancellationTokenSource? pollingCancel;
     private bool polling;
     private int commandVersion;
+    private TrayController? tray;
+    private TunnelState? trayState;
+    private bool exitRequested, systemEnding;
+    private void ShowFromTray() { Show(); if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal; Activate(); }
+    private void UpdateTray() => tray?.Update(trayState, busy || serviceOperation);
+    private void ExitFromTray() { exitRequested = true; Close(); }
+    private async void ConnectFromTray()
+    {
+        if (busy || serviceOperation) return;
+        try {
+            if (trayState is null) {
+                serviceOperation = true; UpdateTray();
+                try { await ServiceControl.StartAsync(); }
+                finally { serviceOperation = false; UpdateTray(); }
+                await RefreshAsync();
+            }
+            if (!initialized) { ShowFromTray(); return; }
+            if (dirty) ShowFromTray();
+            Connect_Click(this, new RoutedEventArgs());
+        } catch (Exception ex) { ShowFromTray(); MessageBox.Show(this, ex.Message, "Подключение VPN"); }
+    }
 
     public MainWindow()
     {
@@ -36,16 +57,26 @@ public partial class MainWindow : Window
         KindBox.SelectedIndex = 0; TargetBox.SelectedIndex = 0;
         ProtocolBox.ItemsSource = new[] { new Option<VpnProtocol>(VpnProtocol.Auto, "Авто — перебор доступных протоколов"), new(VpnProtocol.VlessReality, "VLESS / REALITY"), new(VpnProtocol.OpenVpnUdp, "OpenVPN UDP"), new(VpnProtocol.OpenVpnTcp, "OpenVPN TCP"), new(VpnProtocol.OpenVpnXorUdp, "OpenVPN XOR UDP"), new(VpnProtocol.OpenVpnXorTcp, "OpenVPN XOR TCP") };
         RulesGrid.ItemsSource = rows;
-        Loaded += async (_, _) => { await RefreshAsync(); timer.Start(); };
+        Loaded += async (_, _) => {
+            tray ??= new TrayController(ShowFromTray, ConnectFromTray, () => Disconnect_Click(this, new RoutedEventArgs()), ExitFromTray);
+            UpdateTray(); await RefreshAsync(); timer.Start();
+        };
+        Application.Current.SessionEnding += (_, _) => { systemEnding = true; exitRequested = true; };
         timer.Tick += async (_, _) => await RefreshAsync();
         Closing += (_, e) =>
         {
-            if (dirty && MessageBox.Show("Несохранённые изменения будут потеряны. Закрыть окно?", "SelectiveVpn", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) e.Cancel = true;
+            if (!exitRequested) { e.Cancel = true; Hide(); return; }
+            if (!systemEnding && dirty) {
+                ShowFromTray();
+                if (MessageBox.Show(this, "Несохранённые изменения будут потеряны. Выйти? VPN продолжит работать.", "SelectiveVpn", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                { e.Cancel = true; exitRequested = false; }
+            }
         };
-        Closed += (_, _) => { timer.Stop(); lifetime.Cancel(); pollingCancel?.Cancel(); };
+        Closed += (_, _) => { timer.Stop(); lifetime.Cancel(); pollingCancel?.Cancel(); tray?.Dispose(); };
     }
     private void ApplyStatus(StatusSnapshot status)
     {
+        trayState = status.State; UpdateTray();
         if (StatusText.Text != status.Message) StatusText.Text = status.Message;
         if (status.Connection is { } connection)
         {
@@ -90,14 +121,17 @@ public partial class MainWindow : Window
         catch (Exception)
         {
             if (!busy && version == commandVersion && !lifetime.IsCancellationRequested)
+            {
+                trayState = null; UpdateTray();
                 StatusText.Text = "Служба остановлена или недоступна. Нажмите «Запустить службу». Защищённые приложения остаются заблокированными.";
+            }
         }
         finally { pollingCancel = null; polling = false; }
     }
     private async Task<bool> InvokeAsync(RpcRequest request, bool showError = true, bool reload = false)
     {
         if (busy) return false;
-        busy = true;
+        busy = true; UpdateTray();
         commandVersion++;
         pollingCancel?.Cancel();
         ServersBox.IsEnabled = false;
@@ -123,7 +157,7 @@ public partial class MainWindow : Window
             if (showError) MessageBox.Show(ex.Message, "SelectiveVpn", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-        finally { RuleEditor.IsEnabled = RuleActions.IsEnabled = true; busy = false; ProtocolBox.IsEnabled = initialized; ServersBox.IsEnabled = initialized; SaveButton.IsEnabled = initialized; }
+        finally { RuleEditor.IsEnabled = RuleActions.IsEnabled = true; busy = false; ProtocolBox.IsEnabled = initialized; ServersBox.IsEnabled = initialized; SaveButton.IsEnabled = initialized; UpdateTray(); }
     }
     private void LoadSettings(StatusSnapshot status)
     {
@@ -165,24 +199,24 @@ public partial class MainWindow : Window
     private async void StopService_Click(object sender, RoutedEventArgs e)
     {
         if (serviceOperation) return;
-        serviceOperation = true;
+        serviceOperation = true; UpdateTray();
         commandVersion++;
         pollingCancel?.Cancel();
         StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = false;
-        try { await ServiceControl.StopAsync(); StatusText.Text = "Служба остановлена. TUN выключен; блокировки выбранных приложений сохранены."; }
+        try { await ServiceControl.StopAsync(); trayState = null; UpdateTray(); StatusText.Text = "Служба остановлена. TUN выключен; блокировки выбранных приложений сохранены."; }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Остановка службы"); }
-        finally { serviceOperation = false; StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = true; }
+        finally { serviceOperation = false; StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = true; UpdateTray(); }
     }
     private async void StartService_Click(object sender, RoutedEventArgs e)
     {
         if (serviceOperation) return;
-        serviceOperation = true;
+        serviceOperation = true; UpdateTray();
         commandVersion++;
         pollingCancel?.Cancel();
         StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = false;
         try { await ServiceControl.StartAsync(); await RefreshAsync(); }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Запуск службы"); }
-        finally { serviceOperation = false; StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = true; }
+        finally { serviceOperation = false; StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = true; UpdateTray(); }
     }
     private async void RefreshServers_Click(object sender, RoutedEventArgs e)
     {

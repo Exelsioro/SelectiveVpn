@@ -10,7 +10,7 @@ if ($existing) { Stop-Service -Name SelectiveVpn -Force; $existing.WaitForStatus
 $uiPath = Join-Path $destination 'App\SelectiveVpn.App.exe'
 foreach ($ui in @(Get-Process -Name SelectiveVpn.App -ErrorAction SilentlyContinue)) {
     if ($ui.Path -eq $uiPath) {
-        if (!$ui.CloseMainWindow() -or !$ui.WaitForExit(10000)) { throw 'Close SelectiveVpn UI (save pending edits) before updating.' }
+        if (!$ui.CloseMainWindow() -or !$ui.WaitForExit(10000)) { throw 'Exit SelectiveVpn using the tray menu (save pending edits) before updating. The window close button only hides it.' }
     }
 }
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
