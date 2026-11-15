@@ -15,6 +15,9 @@ foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
     $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
     $acl.AddAccessRule($rule)
 }
+# Standard users need read/execute so Explorer can read the UI's UAC manifest.
+$users = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($users, 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
 Set-Acl -LiteralPath $destination -AclObject $acl
 Copy-Item -Path (Join-Path $source '*') -Destination $destination -Recurse -Force
 $serviceExe = Join-Path $destination 'Service\SelectiveVpn.Service.exe'
