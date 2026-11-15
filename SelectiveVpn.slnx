@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="src/SelectiveVpn.Core/SelectiveVpn.Core.csproj" />
+  <Project Path="src/SelectiveVpn.Windows/SelectiveVpn.Windows.csproj" />
+  <Project Path="src/SelectiveVpn.Service/SelectiveVpn.Service.csproj" />
+  <Project Path="src/SelectiveVpn.App/SelectiveVpn.App.csproj" />
+  <Project Path="tests/SelectiveVpn.Tests/SelectiveVpn.Tests.csproj" />
+  <Project Path="tests/SelectiveVpn.Probe/SelectiveVpn.Probe.csproj" />
+</Solution>

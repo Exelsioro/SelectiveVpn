@@ -1,0 +1,21 @@
+#Requires -RunAsAdministrator
+param([switch]$RemoveApplicationBlocks)
+$ErrorActionPreference = 'Stop'
+$destination = Join-Path $env:ProgramFiles 'SelectiveVpn'
+$service = Get-Service -Name SelectiveVpn -ErrorAction SilentlyContinue
+if ($service) {
+    Stop-Service -Name SelectiveVpn -Force
+    $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+    & sc.exe delete SelectiveVpn | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot remove service.' }
+}
+if ($RemoveApplicationBlocks) {
+    & (Join-Path $destination 'Service\SelectiveVpn.Service.exe') --remove-protection
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot remove application blocks.' }
+    Write-Host 'Application blocks removed. These apps may now use the direct connection.'
+} else {
+    Write-Host 'Application blocks are retained. Run again with -RemoveApplicationBlocks to explicitly remove them.'
+}
+$shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'SelectiveVpn.lnk'
+if (Test-Path -LiteralPath $shortcut) { Remove-Item -LiteralPath $shortcut }
+Write-Host 'Service removed. Binaries and encrypted settings are retained for recovery.'

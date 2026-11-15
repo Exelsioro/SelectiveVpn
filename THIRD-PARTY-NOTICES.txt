@@ -1,0 +1,15 @@
+SelectiveVpn uses sing-box 1.14.4 as a separate executable process.
+Project: https://github.com/SagerNet/sing-box
+Release/source: https://github.com/SagerNet/sing-box/tree/v1.14.4
+License: GNU General Public License version 3 or later (GPL-3.0-or-later).
+License text: https://github.com/SagerNet/sing-box/blob/v1.14.4/LICENSE
+Source archive: https://github.com/SagerNet/sing-box/archive/refs/tags/v1.14.4.tar.gz
+The runtime is downloaded unchanged and verified by SHA256.
+Redistribution of sing-box requires compliance with its license, including source obligations.
+
+Microsoft .NET and Microsoft.Extensions libraries: MIT license.
+https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
+https://github.com/dotnet/extensions/blob/main/LICENSE.TXT
+
+PlanetVPN profiles are user-provided local data. They are not part of this Git repository.
+This is an independent personal client, not an official PlanetVPN application.
