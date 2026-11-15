@@ -22,6 +22,10 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(3) };
     private bool busy, loading, initialized, dirty, serviceOperation;
     private ClientSettings current = new();
+    private readonly CancellationTokenSource lifetime = new();
+    private CancellationTokenSource? pollingCancel;
+    private bool polling;
+    private int commandVersion;
 
     public MainWindow()
     {
@@ -38,34 +42,74 @@ public partial class MainWindow : Window
         {
             if (dirty && MessageBox.Show("Несохранённые изменения будут потеряны. Закрыть окно?", "SelectiveVpn", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) e.Cancel = true;
         };
-        Closed += (_, _) => timer.Stop();
+        Closed += (_, _) => { timer.Stop(); lifetime.Cancel(); pollingCancel?.Cancel(); };
+    }
+    private void ApplyStatus(StatusSnapshot status)
+    {
+        if (StatusText.Text != status.Message) StatusText.Text = status.Message;
+        var protection = status.ProtectionActive ? $"Защищено приложений: {status.ProtectedApplications}" : "Защита не подтверждена";
+        if (ProtectionText.Text != protection) ProtectionText.Text = protection;
+        var events = string.Join(Environment.NewLine, status.Events.Reverse());
+        if (EventsBox.Text != events)
+        {
+            var offset = EventsBox.VerticalOffset;
+            var start = EventsBox.SelectionStart;
+            var length = EventsBox.SelectionLength;
+            EventsBox.Text = events;
+            EventsBox.Select(Math.Min(start, events.Length), Math.Min(length, Math.Max(0, events.Length - start)));
+            EventsBox.ScrollToVerticalOffset(offset);
+        }
     }
     private async Task RefreshAsync()
     {
-        if (busy) return;
-        await InvokeAsync(new("status"), false);
+        if (busy || polling || serviceOperation || lifetime.IsCancellationRequested) return;
+        polling = true;
+        int version = commandVersion;
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        pollingCancel = cancellation;
+        try
+        {
+            var response = await Task.Run(() => PipeRpc.CallAsync(new("status"), cancellation.Token), cancellation.Token);
+            if (busy || version != commandVersion || cancellation.IsCancellationRequested) return;
+            if (!response.Success) throw new InvalidOperationException(response.Error);
+            if (response.Status is { } status)
+            {
+                ApplyStatus(status);
+                // Polling never reloads the user's editing draft after initialization.
+                if (!initialized) LoadSettings(status);
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            if (!busy && version == commandVersion && !lifetime.IsCancellationRequested)
+                StatusText.Text = "Служба остановлена или недоступна. Нажмите «Запустить службу». Защищённые приложения остаются заблокированными.";
+        }
+        finally { pollingCancel = null; polling = false; }
     }
     private async Task<bool> InvokeAsync(RpcRequest request, bool showError = true, bool reload = false)
     {
         if (busy) return false;
         busy = true;
+        commandVersion++;
+        pollingCancel?.Cancel();
         ServersBox.IsEnabled = false;
         ProtocolBox.IsEnabled = false;
         SaveButton.IsEnabled = false;
         RuleEditor.IsEnabled = RuleActions.IsEnabled = false;
         try
         {
-            var response = await PipeRpc.CallAsync(request);
+            var response = await Task.Run(() => PipeRpc.CallAsync(request, lifetime.Token), lifetime.Token);
+            if (lifetime.IsCancellationRequested) return false;
             if (response.Status is { } status)
             {
-                StatusText.Text = status.Message;
-                ProtectionText.Text = status.ProtectionActive ? $"Защищено приложений: {status.ProtectedApplications}" : "Защита не подтверждена";
-                EventsBox.Text = string.Join(Environment.NewLine, status.Events.Reverse());
+                ApplyStatus(status);
                 if (!initialized || reload) LoadSettings(status);
             }
             if (!response.Success) throw new InvalidOperationException(response.Error);
             return true;
         }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { return false; }
         catch (Exception ex)
         {
             StatusText.Text = request.Command == "status" ? "Служба остановлена или недоступна. Нажмите «Запустить службу». Защищённые приложения остаются заблокированными." : ex.Message;
@@ -113,6 +157,8 @@ public partial class MainWindow : Window
     {
         if (serviceOperation) return;
         serviceOperation = true;
+        commandVersion++;
+        pollingCancel?.Cancel();
         StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = false;
         try { await ServiceControl.StopAsync(); StatusText.Text = "Служба остановлена. TUN выключен; блокировки выбранных приложений сохранены."; }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Остановка службы"); }
@@ -122,6 +168,8 @@ public partial class MainWindow : Window
     {
         if (serviceOperation) return;
         serviceOperation = true;
+        commandVersion++;
+        pollingCancel?.Cancel();
         StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = false;
         try { await ServiceControl.StartAsync(); await RefreshAsync(); }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Запуск службы"); }
