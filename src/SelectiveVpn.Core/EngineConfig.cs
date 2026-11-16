@@ -6,7 +6,8 @@ public sealed record ProbeEndpoint(int Port, string Username, string Password);
 
 public static class EngineConfig
 {
-    public static JsonObject Build(ClientSettings rawSettings, ServerProfile? server, bool online, ProbeEndpoint probe, bool tun = true, string? physicalInterface = null, string? vpnInterface = null, bool directIPv6Available = true)
+    public static JsonObject Build(ClientSettings rawSettings, ServerProfile? server, bool online, ProbeEndpoint probe, bool tun = true, string? physicalInterface = null, string? vpnInterface = null, bool directIPv6Available = true,
+        VpnProtocol protocol = VpnProtocol.VlessReality)
     {
         var settings = Policy.Normalize(rawSettings);
         if (online && server is null) throw new ArgumentException("Выберите сервер.");
@@ -24,15 +25,17 @@ public static class EngineConfig
             ["users"] = new JsonArray(new JsonObject { ["username"] = probe.Username, ["password"] = probe.Password })
         });
         var outbounds = new JsonArray(new JsonObject { ["type"] = "direct", ["tag"] = "direct" });
-        if (physicalInterface is not null) outbounds[0]!["bind_interface"] = physicalInterface;
+        if (!string.IsNullOrEmpty(physicalInterface)) outbounds[0]!["bind_interface"] = physicalInterface;
         if (!directIPv6Available)
             outbounds[0]!["domain_resolver"] = new JsonObject { ["server"] = "dns-direct", ["strategy"] = "ipv4_only" };
-        if (online && vpnInterface is not null) outbounds.Add(new JsonObject
+        bool usesWireGuard = online && protocol == VpnProtocol.WireGuard;
+        JsonObject? wireGuard = usesWireGuard ? BuildWireGuard(server!, physicalInterface) : null;
+        if (online && !usesWireGuard && !string.IsNullOrEmpty(vpnInterface)) outbounds.Add(new JsonObject
         {
             ["type"] = "direct", ["tag"] = "vpn", ["bind_interface"] = vpnInterface,
             ["domain_resolver"] = new JsonObject { ["server"] = "dns-vpn", ["strategy"] = "ipv4_only" }
         });
-        else if (online) outbounds.Add(new JsonObject
+        else if (online && !usesWireGuard) outbounds.Add(new JsonObject
         {
             ["type"] = "vless", ["tag"] = "vpn", ["server"] = server!.Address, ["server_port"] = server.Port,
             ["uuid"] = server.Uuid, ["flow"] = server.Flow,
@@ -43,7 +46,7 @@ public static class EngineConfig
                 ["reality"] = new JsonObject { ["enabled"] = true, ["public_key"] = server.PublicKey, ["short_id"] = server.ShortId }
             }
         });
-        if (online && vpnInterface is null && physicalInterface is not null) outbounds[^1]!["bind_interface"] = physicalInterface;
+        if (online && !usesWireGuard && string.IsNullOrEmpty(vpnInterface) && !string.IsNullOrEmpty(physicalInterface)) outbounds[^1]!["bind_interface"] = physicalInterface;
         if (tun && server is not null)
         {
             var exclusions = new JsonArray();
@@ -61,6 +64,8 @@ public static class EngineConfig
             new JsonObject { ["protocol"] = "dns", ["action"] = "hijack-dns" },
             WithTarget(new JsonObject { ["inbound"] = "probe-in" }, RouteTarget.Vpn, online)
         };
+        if (usesWireGuard)
+            rules.Insert(0, new JsonObject { ["inbound"] = "vpn", ["action"] = "reject" });
         if (settings.ProtectedApplications.Length > 0 && (online || !settings.BlockVpnDomainsWhenDisconnected))
             rules.Add(WithTarget(new JsonObject { ["process_path_regex"] = new JsonArray(".+"), ["invert"] = true }, RouteTarget.Vpn, online));
         foreach (var rule in Policy.Ordered(settings))
@@ -78,9 +83,15 @@ public static class EngineConfig
             new JsonObject { ["type"] = "https", ["tag"] = "dns-direct", ["server"] = "1.1.1.1", ["path"] = "/dns-query" },
             new JsonObject { ["type"] = "fakeip", ["tag"] = "fakeip", ["inet4_range"] = "198.18.0.0/15", ["inet6_range"] = "fc00::/18" }
         };
-        if (online) dnsServers.Add(new JsonObject { ["type"] = "https", ["tag"] = "dns-vpn", ["server"] = "1.1.1.1", ["path"] = "/dns-query", ["detour"] = "vpn" });
-        if (physicalInterface is not null) dnsServers[0]!["bind_interface"] = physicalInterface;
-        return new JsonObject
+        if (online)
+        {
+            string? wgDns = usesWireGuard ? server!.WireGuard!.Dns : null;
+            dnsServers.Add(wgDns is not null
+                ? new JsonObject { ["type"] = "udp", ["tag"] = "dns-vpn", ["server"] = wgDns, ["detour"] = "vpn" }
+                : new JsonObject { ["type"] = "https", ["tag"] = "dns-vpn", ["server"] = "1.1.1.1", ["path"] = "/dns-query", ["detour"] = "vpn" });
+        }
+        if (!string.IsNullOrEmpty(physicalInterface)) dnsServers[0]!["bind_interface"] = physicalInterface;
+        var result = new JsonObject
         {
             ["log"] = new JsonObject { ["level"] = settings.DiagnosticLogging ? "debug" : "info", ["timestamp"] = true },
             ["experimental"] = new JsonObject { ["cache_file"] = new JsonObject { ["enabled"] = tun, ["path"] = "cache.db", ["store_fakeip"] = true } },
@@ -97,8 +108,32 @@ public static class EngineConfig
                 ["default_domain_resolver"] = "dns-direct", ["rules"] = rules, ["final"] = "direct"
             }
         };
+        if (wireGuard is not null) result["endpoints"] = new JsonArray(wireGuard);
+        return result;
     }
 
+    private static JsonObject BuildWireGuard(ServerProfile server, string? physicalInterface)
+    {
+        var profile = server.WireGuard ?? throw new ArgumentException("Отсутствует профиль WireGuard.");
+        var peer = new JsonObject
+        {
+            ["address"] = server.Address, ["port"] = server.Port, ["public_key"] = profile.PublicKey,
+            ["allowed_ips"] = Strings(profile.AllowedIps), ["persistent_keepalive_interval"] = profile.KeepaliveSeconds
+        };
+        if (profile.PresharedKey is not null) peer["pre_shared_key"] = profile.PresharedKey;
+        var endpoint = new JsonObject
+        {
+            ["type"] = "wireguard", ["tag"] = "vpn", ["system"] = false,
+            ["address"] = Strings(profile.Addresses), ["private_key"] = profile.PrivateKey, ["peers"] = new JsonArray(peer),
+            ["domain_resolver"] = "dns-direct"
+        };
+        if (!string.IsNullOrEmpty(physicalInterface)) endpoint["bind_interface"] = physicalInterface;
+        if (profile.Mtu is not null) endpoint["mtu"] = profile.Mtu.Value;
+        return endpoint;
+    }
+
+    private static JsonArray Strings(IEnumerable<string> values) =>
+        new(values.Select(value => (JsonNode?)JsonValue.Create(value)).ToArray());
 
     private static JsonArray BuildDnsRules(ClientSettings settings, bool directIPv6Available)
     {
@@ -137,7 +172,7 @@ public static class EngineConfig
     private static JsonObject ResolveTunAddresses(string server, params string[] queryTypes) => new()
     {
         ["inbound"] = "tun-in",
-        ["query_type"] = new JsonArray(queryTypes.Select(type => (JsonNode?)JsonValue.Create(type)).ToArray()),
+        ["query_type"] = Strings(queryTypes),
         ["action"] = "route",
         ["server"] = server
     };

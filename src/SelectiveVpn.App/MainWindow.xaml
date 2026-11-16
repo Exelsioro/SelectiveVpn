@@ -127,6 +127,50 @@
           </Grid>
         </TabItem>
 
+
+        <TabItem Header="Серверы">
+          <Grid Margin="0,14,0,0">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <DockPanel Margin="0,0,0,8">
+              <WrapPanel DockPanel.Dock="Right">
+                <Button x:Name="RefreshCatalogButton" Content="Обновить PlanetVPN" Click="RefreshServers_Click" Style="{StaticResource CommandButton}" Margin="0,0,8,0" IsEnabled="False"/>
+                <Button x:Name="ImportServerButton" Content="Добавить из файла…" Click="Import_Click" Style="{StaticResource CommandButton}" IsEnabled="False"/>
+              </WrapPanel>
+              <TextBlock Text="Список серверов" Style="{StaticResource SectionTitle}" VerticalAlignment="Center"/>
+            </DockPanel>
+            <Expander Grid.Row="1" Header="Как добавить и проверить сервер" Margin="0,0,0,8" Foreground="{StaticResource InkBrush}">
+              <ScrollViewer MaxHeight="132" VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="12,5,4,6">
+                  <TextBlock Text="PlanetVPN: обновление получает бесплатные профили из API. Сторонние и ранее сохранённые профили остаются в списке. Удалённые локации PlanetVPN при обновлении не возвращаются." Style="{StaticResource Hint}"/>
+                  <TextBlock Text="Из файла: Xray JSON (VLESS/REALITY по TCP), OpenVPN .ovpn со встроенными сертификатами или WireGuard .conf с одним Peer. Маршруты задаются в SelectiveVpn." Style="{StaticResource Hint}" Margin="0,5,0,0"/>
+                  <TextBlock Text="Проверка измеряет доступность TCP-порта. Для UDP показывается ответ хоста на ping. Эти результаты не проверяют вход в VPN." Style="{StaticResource Hint}" Margin="0,5,0,0"/>
+                </StackPanel>
+              </ScrollViewer>
+            </Expander>
+            <DataGrid x:Name="ManagedServers" Grid.Row="2" AutomationProperties.Name="Список серверов" AutoGenerateColumns="False"
+                      CanUserAddRows="False" CanUserDeleteRows="False" CanUserSortColumns="False" CanUserReorderColumns="False"
+                      IsReadOnly="True" SelectionMode="Single" SelectionUnit="FullRow" SelectedValuePath="Id"
+                      SelectionChanged="ManagedServer_Changed" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                      HorizontalScrollBarVisibility="Disabled" HorizontalGridLinesBrush="{StaticResource DividerBrush}"
+                      RowHeight="39" Background="{StaticResource InsetBrush}" BorderBrush="{StaticResource DividerBrush}"
+                      BorderThickness="1" ColumnHeaderStyle="{StaticResource RulesHeader}" RowStyle="{StaticResource RulesRow}" CellStyle="{StaticResource RulesCell}">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="Сервер" Binding="{Binding Name}" Width="2*" MinWidth="135" ElementStyle="{StaticResource RuleValue}"/>
+                <DataGridTextColumn Header="Адрес" Binding="{Binding Endpoint}" Width="1.5*" MinWidth="116" ElementStyle="{StaticResource RuleValue}"/>
+                <DataGridTextColumn Header="Протоколы" Binding="{Binding ProtocolLabel}" Width="1.5*" MinWidth="118" ElementStyle="{StaticResource RuleValue}"/>
+                <DataGridTextColumn Header="Доступность" Binding="{Binding CheckLabel}" Width="2*" MinWidth="140" ElementStyle="{StaticResource RuleValue}"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <DockPanel Grid.Row="3" Margin="0,9,0,0">
+              <WrapPanel DockPanel.Dock="Right">
+                <Button x:Name="CheckServerButton" Content="Проверить" Click="CheckServer_Click" Style="{StaticResource CommandButton}" Margin="0,0,8,0" IsEnabled="False"/>
+                <Button x:Name="DeleteServerButton" Content="Удалить сервер" Click="DeleteServer_Click" Style="{StaticResource CommandButton}" IsEnabled="False"/>
+              </WrapPanel>
+              <TextBlock Text="Выбери строку для проверки или удаления." Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            </DockPanel>
+          </Grid>
+        </TabItem>
+
         <TabItem Header="Настройки">
           <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel Margin="0,16,16,4">
@@ -153,10 +197,8 @@
               </Grid>
               <Border Height="1" Background="{StaticResource DividerBrush}" Margin="0,12,0,9"/>
 
-              <TextBlock Text="Серверы и служба" Style="{StaticResource SectionTitle}" Margin="0,0,0,6"/>
+              <TextBlock Text="Служба Windows" Style="{StaticResource SectionTitle}" Margin="0,0,0,6"/>
               <WrapPanel>
-                <Button Content="Обновить каталог" Click="RefreshServers_Click" Style="{StaticResource CommandButton}" Margin="0,0,8,8"/>
-                <Button Content="Импорт серверов" Click="Import_Click" Style="{StaticResource CommandButton}" Margin="0,0,8,8"/>
                 <Button x:Name="StartServiceButton" Content="Запустить службу" Click="StartService_Click" Style="{StaticResource CommandButton}" Margin="0,0,8,8"/>
                 <Button x:Name="StopServiceButton" Content="Остановить службу" Click="StopService_Click" Style="{StaticResource CommandButton}" Margin="0,0,0,8"/>
               </WrapPanel>

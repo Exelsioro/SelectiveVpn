@@ -27,7 +27,7 @@ public sealed class EngineProcess : IDisposable
     public EngineProcess(string executable, SecureStore store, Action<string> log)
     { this.executable = executable; this.store = store; this.log = log; }
 
-    public async Task StartAsync(ClientSettings settings, ServerProfile? server, bool online, CancellationToken ct, bool tun = true, string? physicalInterface = null, string? vpnInterface = null, bool directIPv6Available = true)
+    public async Task StartAsync(ClientSettings settings, ServerProfile? server, bool online, CancellationToken ct, bool tun = true, string? physicalInterface = null, string? vpnInterface = null, bool directIPv6Available = true, VpnProtocol protocol = VpnProtocol.VlessReality)
     {
         Stop();
         lastError = "";
@@ -40,7 +40,7 @@ public sealed class EngineProcess : IDisposable
         listener.Stop();
         probe = new(port, "health", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)));
         var configPath = Path.Combine(store.Root, "engine.json");
-        store.Write("engine.json", Encoding.UTF8.GetBytes(EngineConfig.Build(settings, server, online, probe, tun, physicalInterface, vpnInterface, directIPv6Available).ToJsonString()));
+        store.Write("engine.json", Encoding.UTF8.GetBytes(EngineConfig.Build(settings, server, online, probe, tun, physicalInterface, vpnInterface, directIPv6Available, protocol).ToJsonString()));
         var checkInfo = StartInfo("check", configPath);
         using (var check = Process.Start(checkInfo) ?? throw new InvalidOperationException("Engine check failed to start."))
         {
@@ -118,8 +118,8 @@ public sealed class EngineProcess : IDisposable
     {
         error = System.Text.RegularExpressions.Regex.Replace(error, @"\x1B\[[0-?]*[ -/]*[@-~]", "");
         if (server is not null)
-            foreach (var secret in new[] { server.Uuid, server.PublicKey, server.AccessKey })
-                if (secret.Length >= 8) error = error.Replace(secret, "<credential>", StringComparison.Ordinal);
+            foreach (var secret in new[] { server.Uuid, server.PublicKey, server.AccessKey, server.WireGuard?.PrivateKey, server.WireGuard?.PresharedKey })
+                if (secret is { Length: >= 8 }) error = error.Replace(secret, "<credential>", StringComparison.Ordinal);
         return error.Length > 700 ? error[..700] : error;
     }
     public void Stop()

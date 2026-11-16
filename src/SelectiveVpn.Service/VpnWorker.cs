@@ -10,6 +10,8 @@ public sealed class VpnWorker : BackgroundService
     private readonly ConcurrentQueue<string> events = new();
     private ClientSettings settings = new();
     private ServerProfile[] servers = [];
+    private readonly ConcurrentDictionary<string, ServerCheck> serverChecks = new(StringComparer.Ordinal);
+    private string? activeServerId;
     private SecureStore store = null!;
     private WfpGuard guard = null!;
     private EngineProcess engine = null!;
@@ -37,7 +39,8 @@ public sealed class VpnWorker : BackgroundService
         serviceToken = stoppingToken;
         knownSessions = LogonSessions.Read();
         store = new SecureStore();
-        settings = store.LoadSettings(); servers = store.LoadServers();
+        settings = store.LoadSettings();
+        servers = ServerProfiles.Merge([], store.LoadServers(), settings.DeletedPlanetPools);
         using var localGuard = guard = new WfpGuard();
         using var localEngine = engine = new EngineProcess(Path.Combine(AppContext.BaseDirectory, "runtime", "sing-box.exe"), store, Log);
         using var localTransport = transport = new OpenVpnProcess(Path.Combine(AppContext.BaseDirectory, "runtime", "openvpn", "openvpn.exe"), store, Log);
@@ -71,7 +74,7 @@ public sealed class VpnWorker : BackgroundService
                 if (request.Command == "status") response = new(true, Status: Snapshot());
                 else
                 {
-                    if (request.Command is "connect" or "disconnect" or "save" or "select-server" or "select-protocol" or "refresh") connectionCancel?.Cancel();
+                    if (request.Command is "connect" or "disconnect" or "save" or "select-server" or "select-protocol") connectionCancel?.Cancel();
                     await gate.WaitAsync(deadline.Token);
                     try { response = await HandleAsync(request, deadline.Token); }
                     catch (Exception ex) when (ex is not OperationCanceledException) { Log(ex.Message); response = new(false, ex.Message, Snapshot()); }
@@ -96,8 +99,12 @@ public sealed class VpnWorker : BackgroundService
                 if (requestedOnline) QueueConnect();
                 break;
             case "select-server":
-                if (request.ServerId != "recommended" && !servers.Any(s => s.Id == request.ServerId)) throw new ArgumentException("Сервер не найден.");
-                var selection = settings with { SelectedServerId = request.ServerId };
+                var selectedServer = servers.FirstOrDefault(server => server.Id == request.ServerId);
+                if (request.ServerId != "recommended" && selectedServer is null) throw new ArgumentException("Сервер не найден.");
+                var selectedMode = settings.Protocol;
+                if (selectedServer is not null && selectedMode != VpnProtocol.Auto && !selectedServer.Protocols.Contains(selectedMode))
+                    selectedMode = VpnProtocol.Auto;
+                var selection = settings with { SelectedServerId = request.ServerId, Protocol = selectedMode };
                 store.SaveSettings(selection); settings = selection;
                 Log("Выбор сервера сохранён.");
                 if (requestedOnline) QueueConnect();
@@ -105,21 +112,26 @@ public sealed class VpnWorker : BackgroundService
             case "refresh":
                 var provider = store.LoadProvider() ?? throw new InvalidOperationException("Не установлен ключ формата API. Выполните обновление клиента через Install.ps1.");
                 var updated = await new PlanetCatalog(provider).RefreshAsync(Log, ct);
-                var merged = updated.Concat(servers.Where(s => s.PoolId is not null && updated.All(n => n.Id != s.Id))).ToArray();
-                store.SaveServers(merged); servers = merged;
-                if (!servers.Any(s => s.Id == settings.SelectedServerId)) settings = settings with { SelectedServerId = "recommended" };
-                store.SaveSettings(settings); Log($"Каталог обновлён: {servers.Length} локаций.");
-                if (requestedOnline) QueueConnect();
+                SaveCatalog(ServerProfiles.Merge(servers, updated, settings.DeletedPlanetPools));
+                Log($"Каталог PlanetVPN обновлён. Всего серверов: {servers.Length}.");
                 break;
             case "import":
-                var imported = PlanetProfileImporter.Import(request.ImportJson ?? "").ToArray();
-                store.SaveServers(imported); servers = imported;
-                if (!servers.Any(s => s.Id == settings.SelectedServerId)) settings = settings with { SelectedServerId = "recommended" };
-                store.SaveSettings(settings); Log($"Импортировано: {servers.Length}");
+                var imported = ServerProfiles.Import(request.ImportJson ?? "", request.ImportFormat, request.ImportName,
+                    request.ImportUser, request.ImportPassword);
+                SaveCatalog(ServerProfiles.Merge(servers, imported, settings.DeletedPlanetPools));
+                Log($"Импортировано профилей: {imported.Length}. Всего серверов: {servers.Length}.");
+                break;
+            case "delete-server":
+                await DeleteServerAsync(request.ServerId);
+                break;
+            case "check-server":
+                var checkedServer = servers.FirstOrDefault(server => server.Id == request.ServerId)
+                    ?? throw new ArgumentException("Сервер не найден.");
+                serverChecks[checkedServer.Id] = await PlanetCatalog.CheckAsync(checkedServer, ct);
                 break;
             case "save":
                 var next = Policy.Normalize(request.Settings ?? throw new ArgumentException("Нет настроек."));
-                next = next with { LastSuccessfulServerId = settings.LastSuccessfulServerId, LastSuccessfulProtocol = settings.LastSuccessfulProtocol };
+                next = next with { LastSuccessfulServerId = settings.LastSuccessfulServerId, LastSuccessfulProtocol = settings.LastSuccessfulProtocol, DeletedPlanetPools = settings.DeletedPlanetPools };
                 if (next.SelectedServerId is not (null or "recommended") && !servers.Any(s => s.Id == next.SelectedServerId)) throw new ArgumentException("Сервер не найден.");
                 foreach (var rule in next.Rules.Where(r => r.Enabled && r.Kind == RuleKind.Application))
                 {
@@ -150,6 +162,49 @@ public sealed class VpnWorker : BackgroundService
             default: throw new ArgumentException("Неизвестная команда.");
         }
         return new(true, Status: Snapshot());
+    }
+
+    private void SaveCatalog(ServerProfile[] next, ClientSettings? updatedSettings = null)
+    {
+        var selection = updatedSettings ?? settings;
+        if (selection.SelectedServerId != "recommended" && !next.Any(server => server.Id == selection.SelectedServerId))
+            selection = selection with { SelectedServerId = "recommended", Protocol = VpnProtocol.Auto };
+
+        store.SaveServers(next);
+        var previous = servers.ToDictionary(server => server.Id, StringComparer.Ordinal);
+        var changed = next.Where(server => !previous.TryGetValue(server.Id, out var old)
+            || server.Address != old.Address || server.Port != old.Port || !server.Protocols.SequenceEqual(old.Protocols))
+            .Select(server => server.Id).ToHashSet(StringComparer.Ordinal);
+        servers = next;
+        foreach (var key in serverChecks.Keys)
+            if (changed.Contains(key) || !next.Any(server => server.Id == key)) serverChecks.TryRemove(key, out _);
+        if (!ReferenceEquals(settings, selection))
+        {
+            store.SaveSettings(selection);
+            settings = selection;
+        }
+    }
+
+    private async Task DeleteServerAsync(string? id)
+    {
+        var removed = servers.FirstOrDefault(server => server.Id == id)
+            ?? throw new ArgumentException("Сервер не найден.");
+        var next = settings;
+        if (removed.PoolId is int pool && !next.DeletedPlanetPools.Contains(pool))
+            next = next with { DeletedPlanetPools = [.. next.DeletedPlanetPools, pool] };
+        if (next.LastSuccessfulServerId == removed.Id)
+            next = next with { LastSuccessfulServerId = null, LastSuccessfulProtocol = null };
+
+        bool disconnect = activeServerId == removed.Id || (requestedOnline && servers.Length == 1);
+        SaveCatalog(servers.Where(server => server.Id != removed.Id).ToArray(), next);
+        if (disconnect)
+        {
+            requestedOnline = false;
+            await StopNetworkAsync();
+            await StartDisconnectedFilterAsync();
+            SetState(TunnelState.Disconnected, "VPN отключён: активный сервер удалён.");
+        }
+        Log("Сервер удалён.");
     }
 
     private void QueueConnect()
@@ -206,13 +261,14 @@ public sealed class VpnWorker : BackgroundService
                 try
                 {
                     string? vpnInterface = null;
-                    if (protocol != VpnProtocol.VlessReality)
+                    if (protocol is not (VpnProtocol.VlessReality or VpnProtocol.WireGuard))
                     { await transport.StartAsync(server, protocol, physical, ct); vpnInterface = OpenVpnProcess.InterfaceName; }
-                    await engine.StartAsync(settings, server, true, ct, tun: false, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available);
+                    await engine.StartAsync(settings, server, true, ct, tun: false, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available, protocol: protocol);
                     if (!await engine.ProbeAsync(ct)) throw new IOException("HTTPS через VPN недоступен.");
-                    await engine.StartAsync(settings, server, true, ct, tun: true, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available);
+                    await engine.StartAsync(settings, server, true, ct, tun: true, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available, protocol: protocol);
                     if (!await engine.ProbeAsync(ct)) throw new IOException("Проверка после запуска TUN не прошла.");
                     guard.OpenTunnel(Wire.InterfaceName); activeProtocol = protocol;
+                    activeServerId = server.Id;
                     connectedSince = DateTimeOffset.UtcNow;
                     connectedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                     if (successfulConnections > 0) lastReconnectedAt = connectedSince;
@@ -261,6 +317,7 @@ public sealed class VpnWorker : BackgroundService
     private async Task StopNetworkAsync()
     {
         disconnectedDomainFilter = false;
+        activeServerId = null;
         guard.CloseTunnel();
         if (connectedSince is not null) { totalConnectedSeconds += System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds; connectedSince=null; }
         try { engine.Stop(); }
@@ -275,7 +332,7 @@ public sealed class VpnWorker : BackgroundService
             if (!await gate.WaitAsync(0, ct)) continue;
             try
             {
-                if (state == TunnelState.Connected && (!engine.Running || (activeProtocol != VpnProtocol.VlessReality && !transport.Running) || !await engine.ProbeAsync(ct)))
+                if (state == TunnelState.Connected && (!engine.Running || (activeProtocol is not (VpnProtocol.VlessReality or VpnProtocol.WireGuard) && !transport.Running) || !await engine.ProbeAsync(ct)))
                 {
                     Failure("Проверка доступности или процесс VPN завершились с ошибкой");
                     await StopNetworkAsync();
@@ -313,7 +370,7 @@ public sealed class VpnWorker : BackgroundService
         }
     }
     private StatusSnapshot Snapshot() => new(state, message, guard.Active, settings.ProtectedApplications.Length, Wire.Clone(settings),
-        new[] { new ServerInfo("recommended", "Рекомендуемый — автоматический подбор", "", 0) }.Concat(servers.Select(s => new ServerInfo(s.Id, s.Name, s.Address, s.Port, s.Protocols))).ToArray(), events.ToArray(), new ConnectionStats(connectedSince, lastReconnectedAt, successfulConnections, reconnectAttempts, failures, lastFailureAt, lastFailure,
+        new[] { new ServerInfo("recommended", "Рекомендуемый — автоматический подбор", "", 0) }.Concat(servers.Select(s => new ServerInfo(s.Id, s.Name, s.Address, s.Port, s.Protocols, serverChecks.GetValueOrDefault(s.Id), s.Id == activeServerId))).ToArray(), events.ToArray(), new ConnectionStats(connectedSince, lastReconnectedAt, successfulConnections, reconnectAttempts, failures, lastFailureAt, lastFailure,
             state == TunnelState.Faulted && requestedOnline ? new DateTimeOffset(retryAt, TimeSpan.Zero) : null,
             totalConnectedSeconds + (connectedSince is null ? 0 : System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds)),
         DisconnectedDomainFilterActive: disconnectedDomainFilter);

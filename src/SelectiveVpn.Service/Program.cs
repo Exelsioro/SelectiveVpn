@@ -13,12 +13,14 @@ if (importIndex >= 0)
 {
     if (importIndex + 1 >= args.Length) throw new ArgumentException("Profile file is required.");
     var store = new SecureStore();
-    var servers = PlanetProfileImporter.Import(await File.ReadAllTextAsync(args[importIndex + 1])).ToArray();
-    store.SaveServers(servers);
+    string path = args[importIndex + 1];
+    var imported = ServerProfiles.Import(await File.ReadAllTextAsync(path), Path.GetExtension(path), Path.GetFileNameWithoutExtension(path));
     var settings = store.LoadSettings();
+    var servers = ServerProfiles.Merge(store.LoadServers(), imported, settings.DeletedPlanetPools);
+    store.SaveServers(servers);
     if (!servers.Any(s => s.Id == settings.SelectedServerId)) settings.SelectedServerId = servers[0].Id;
     store.SaveSettings(settings);
-    Console.WriteLine($"Imported {servers.Length} profiles.");
+    Console.WriteLine($"Imported {imported.Length} profiles. Total: {servers.Length}.");
     return;
 }
 
@@ -36,9 +38,9 @@ if (args.Contains("--refresh-catalog", StringComparer.Ordinal))
     var store = new SecureStore();
     var provider = store.LoadProvider() ?? throw new InvalidOperationException("Import provider settings first.");
     var profiles = await new PlanetCatalog(provider).RefreshAsync(Console.WriteLine, CancellationToken.None);
-    var merged = profiles.Concat(store.LoadServers().Where(s => s.PoolId is not null && profiles.All(n => n.Id != s.Id))).ToArray();
-    store.SaveServers(merged);
     var settings = store.LoadSettings();
+    var merged = ServerProfiles.Merge(store.LoadServers(), profiles, settings.DeletedPlanetPools);
+    store.SaveServers(merged);
     if (!merged.Any(s => s.Id == settings.SelectedServerId)) settings.SelectedServerId = "recommended";
     store.SaveSettings(settings);
     Console.WriteLine($"Catalog contains {merged.Length} locations.");

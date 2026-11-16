@@ -6,7 +6,7 @@ namespace SelectiveVpn.Core;
 public enum RuleKind { Application, Domain, DomainSuffix, IpCidr }
 public enum RouteTarget { Direct, Vpn }
 public enum TunnelState { Starting, Disconnected, Connecting, Connected, Faulted, Stopping }
-public enum VpnProtocol { Auto, VlessReality, OpenVpnUdp, OpenVpnTcp, OpenVpnXorUdp, OpenVpnXorTcp }
+public enum VpnProtocol { Auto, VlessReality, OpenVpnUdp, OpenVpnTcp, OpenVpnXorUdp, OpenVpnXorTcp, WireGuard }
 
 public sealed record RoutingRule
 {
@@ -27,6 +27,7 @@ public sealed record ClientSettings
     public string? SelectedServerId { get; set; }
     public VpnProtocol Protocol { get; set; } = VpnProtocol.Auto;
     public string? LastSuccessfulServerId { get; set; }
+    public int[] DeletedPlanetPools { get; set; } = [];
     public VpnProtocol? LastSuccessfulProtocol { get; set; }
     public RouteTarget DefaultRoute { get; set; } = RouteTarget.Direct;
     public List<RoutingRule> Rules { get; set; } = [];
@@ -46,18 +47,36 @@ public sealed record ServerProfile(string Id, string Name, string Address, int P
     public int? PoolId { get; init; }
     public string? Country { get; init; }
     public Dictionary<VpnProtocol, string> OpenVpnConfigs { get; init; } = [];
+    public WireGuardProfile? WireGuard { get; init; }
     public string AccessUser { get; init; } = "";
     public string AccessKey { get; init; } = "";
-    [JsonIgnore] public VpnProtocol[] Protocols => (Uuid.Length > 0 ? new[] { VpnProtocol.VlessReality } : []).Concat(OpenVpnConfigs.Keys).ToArray();
+    [JsonIgnore] public VpnProtocol[] Protocols => (Uuid.Length > 0 ? new[] { VpnProtocol.VlessReality } : []).Concat(OpenVpnConfigs.Keys).Concat(WireGuard is null ? [] : [VpnProtocol.WireGuard]).ToArray();
 }
-public sealed record ServerInfo(string Id, string Name, string Address, int Port, VpnProtocol[]? Protocols = null)
+public sealed record WireGuardProfile(string[] Addresses, string PrivateKey, string PublicKey, string? PresharedKey,
+    string[] AllowedIps, int KeepaliveSeconds, int? Mtu, string? Dns);
+
+public sealed record ServerCheck(string Label, DateTimeOffset CheckedAt);
+public sealed record ServerInfo(string Id, string Name, string Address, int Port, VpnProtocol[]? Protocols = null, ServerCheck? Check = null, bool IsActive = false)
 {
-    [JsonIgnore] public string DisplayName => Address.Length == 0 ? Name : $"{Name} — {Address}:{Port}";
+    [JsonIgnore] public string Endpoint => Address.Length == 0 ? "" : Address.Contains(':') ? $"[{Address}]:{Port}" : $"{Address}:{Port}";
+    [JsonIgnore] public string DisplayName => Address.Length == 0 ? Name : $"{Name} — {Endpoint}" + (Check is null ? "" : $" · {Check.Label}");
+    [JsonIgnore] public string ProtocolLabel => string.Join(", ", (Protocols ?? []).Select(protocol => protocol switch
+    {
+        VpnProtocol.VlessReality => "VLESS / REALITY",
+        VpnProtocol.OpenVpnUdp => "OpenVPN UDP",
+        VpnProtocol.OpenVpnTcp => "OpenVPN TCP",
+        VpnProtocol.OpenVpnXorUdp => "OpenVPN XOR UDP",
+        VpnProtocol.OpenVpnXorTcp => "OpenVPN XOR TCP",
+        VpnProtocol.WireGuard => "WireGuard",
+        _ => protocol.ToString()
+    }));
+    [JsonIgnore] public string CheckLabel => IsActive ? "Подключён" + (Check is null ? "" : $" · {Check.Label}") : Check?.Label ?? "Не проверен";
 }
 public sealed record StatusSnapshot(TunnelState State, string Message, bool ProtectionActive,
     int ProtectedApplications, ClientSettings Settings, ServerInfo[] Servers, string[] Events, ConnectionStats? Connection = null, bool DisconnectedDomainFilterActive = false);
 public sealed record ConnectionStats(DateTimeOffset? ConnectedSince, DateTimeOffset? LastReconnectedAt, int SuccessfulConnections, int ReconnectAttempts, int Failures, DateTimeOffset? LastFailureAt, string? LastFailure, DateTimeOffset? NextRetryAt, double TotalConnectedSeconds);
-public sealed record RpcRequest(string Command, ClientSettings? Settings = null, string? ImportJson = null, string? ServerId = null, VpnProtocol? Protocol = null);
+public sealed record RpcRequest(string Command, ClientSettings? Settings = null, string? ImportJson = null, string? ServerId = null, VpnProtocol? Protocol = null, string? ImportFormat = null,
+    string? ImportName = null, string? ImportUser = null, string? ImportPassword = null);
 public sealed record ProviderSettings(string ConnectionKeyBase64);
 public sealed record RpcResponse(bool Success, string? Error = null, StatusSnapshot? Status = null);
 

@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(3) };
     private bool busy, loading, initialized, dirty, serviceOperation;
     private ClientSettings current = new();
+    private ServerInfo[] displayedServers = [];
     private readonly CancellationTokenSource lifetime = new();
     private CancellationTokenSource? pollingCancel;
     private bool polling;
@@ -53,6 +54,7 @@ public partial class MainWindow : Window
             trayState is TunnelState.Connected or TunnelState.Connecting or TunnelState.Faulted;
         SaveButton.IsEnabled = initialized && dirty && !commandBusy && trayState is not null;
         if (trayState is not TunnelState.Connected) SessionText.Text = "";
+        UpdateServerActions();
     }
     private void ExitFromTray() { exitRequested = true; Close(); }
     private async void ConnectFromTray()
@@ -78,7 +80,7 @@ public partial class MainWindow : Window
         var targets = new[] { new Option<RouteTarget>(RouteTarget.Vpn, "Через VPN"), new(RouteTarget.Direct, "Напрямую") };
         TargetBox.ItemsSource = targets; DefaultBox.ItemsSource = targets;
         KindBox.SelectedIndex = 0; TargetBox.SelectedIndex = 0;
-        ProtocolBox.ItemsSource = new[] { new Option<VpnProtocol>(VpnProtocol.Auto, "Авто — перебор доступных протоколов"), new(VpnProtocol.VlessReality, "VLESS / REALITY"), new(VpnProtocol.OpenVpnUdp, "OpenVPN UDP"), new(VpnProtocol.OpenVpnTcp, "OpenVPN TCP"), new(VpnProtocol.OpenVpnXorUdp, "OpenVPN XOR UDP"), new(VpnProtocol.OpenVpnXorTcp, "OpenVPN XOR TCP") };
+        ProtocolBox.ItemsSource = new[] { new Option<VpnProtocol>(VpnProtocol.Auto, "Авто — перебор доступных протоколов"), new(VpnProtocol.VlessReality, "VLESS / REALITY"), new(VpnProtocol.OpenVpnUdp, "OpenVPN UDP"), new(VpnProtocol.OpenVpnTcp, "OpenVPN TCP"), new(VpnProtocol.OpenVpnXorUdp, "OpenVPN XOR UDP"), new(VpnProtocol.OpenVpnXorTcp, "OpenVPN XOR TCP"), new(VpnProtocol.WireGuard, "WireGuard") };
         RulesGrid.ItemsSource = rows;
         Loaded += async (_, _) => await InitializeTrayAsync();
         Application.Current.SessionEnding += (_, _) => { systemEnding = true; exitRequested = true; };
@@ -127,7 +129,9 @@ public partial class MainWindow : Window
     }
     private void ApplyStatus(StatusSnapshot status)
     {
-        trayState = status.State; UpdateTray();
+        trayState = status.State;
+        if (initialized) UpdateServerList(status);
+        UpdateTray();
         const string connectedPrefix = "Подключено: ";
         string statusMessage = status.State == TunnelState.Connected && status.Message.StartsWith(connectedPrefix, StringComparison.Ordinal)
             ? status.Message[connectedPrefix.Length..] : status.Message;
@@ -228,8 +232,7 @@ public partial class MainWindow : Window
         loading = true;
         current = Wire.Clone(status.Settings);
         rows.Clear(); foreach (var rule in current.Rules) rows.Add(new(rule));
-        ServersBox.ItemsSource = status.Servers; ServersBox.SelectedValue = current.SelectedServerId;
-        if (ServersBox.SelectedValue is null) ServersBox.SelectedValue = "recommended";
+        UpdateServerList(status);
         ProtocolBox.SelectedValue = current.Protocol;
         DefaultBox.SelectedValue = current.DefaultRoute; AutoConnectBox.IsChecked = current.AutoConnect; LogonBox.IsChecked = current.ConnectOnLogon; DiagnosticsBox.IsChecked = current.DiagnosticLogging;
         BlockDomainsBox.IsChecked = current.BlockVpnDomainsWhenDisconnected;
@@ -286,11 +289,65 @@ public partial class MainWindow : Window
         catch (Exception ex) { MessageBox.Show(ex.Message, "Запуск службы"); }
         finally { serviceOperation = false; StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = true; UpdateTray(); }
     }
-    private async void RefreshServers_Click(object sender, RoutedEventArgs e)
+    private async void RefreshServers_Click(object sender, RoutedEventArgs e) =>
+        await InvokeAsync(new("refresh"));
+
+    private void UpdateServerList(StatusSnapshot status)
     {
-        if (busy) return;
-        if (dirty && !await SaveAsync()) return;
-        await InvokeAsync(new("refresh"), reload: true);
+        bool wasLoading = loading;
+        loading = true;
+        try
+        {
+            bool catalogChanged = displayedServers.Length != status.Servers.Length ||
+                !displayedServers.Zip(status.Servers).All(pair =>
+                    pair.First.Id == pair.Second.Id && pair.First.DisplayName == pair.Second.DisplayName &&
+                    pair.First.ProtocolLabel == pair.Second.ProtocolLabel && pair.First.Check == pair.Second.Check &&
+                    pair.First.IsActive == pair.Second.IsActive);
+            if (catalogChanged)
+            {
+                string? managedSelection = ManagedServers.SelectedValue as string;
+                displayedServers = status.Servers;
+                ServersBox.ItemsSource = displayedServers;
+                ManagedServers.ItemsSource = displayedServers.Where(server => server.Id != "recommended").ToArray();
+                ManagedServers.SelectedValue = managedSelection;
+            }
+
+            if (catalogChanged || current.SelectedServerId != status.Settings.SelectedServerId)
+                ServersBox.SelectedValue = displayedServers.Any(server => server.Id == status.Settings.SelectedServerId)
+                    ? status.Settings.SelectedServerId : "recommended";
+            if (current.Protocol != status.Settings.Protocol)
+                ProtocolBox.SelectedValue = status.Settings.Protocol;
+            current.SelectedServerId = status.Settings.SelectedServerId;
+            current.Protocol = status.Settings.Protocol;
+        }
+        finally { loading = wasLoading; }
+    }
+
+    private void ManagedServer_Changed(object sender, SelectionChangedEventArgs e) => UpdateServerActions();
+
+    private void UpdateServerActions()
+    {
+        if (CheckServerButton is null || DeleteServerButton is null) return;
+        bool available = initialized && !busy && !serviceOperation && trayState is not null;
+        RefreshCatalogButton.IsEnabled = ImportServerButton.IsEnabled = available;
+        CheckServerButton.IsEnabled = DeleteServerButton.IsEnabled = available && ManagedServers.SelectedItem is ServerInfo;
+    }
+
+    private async void CheckServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ManagedServers.SelectedItem is not ServerInfo server || busy) return;
+        CheckServerButton.Content = "Проверка…";
+        try { await InvokeAsync(new("check-server", ServerId: server.Id)); }
+        finally { CheckServerButton.Content = "Проверить"; }
+    }
+
+    private async void DeleteServer_Click(object sender, RoutedEventArgs e)
+    {
+        if (ManagedServers.SelectedItem is not ServerInfo server || busy) return;
+        var consequence = server.IsActive ? "\nЭтот сервер используется. VPN отключится." : "";
+        if (MessageBox.Show(this, $"Удалить сервер «{server.Name}»?{consequence}", "Удаление сервера",
+            MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes)
+            await InvokeAsync(new("delete-server", ServerId: server.Id));
     }
     private void OpenLog_Click(object sender, RoutedEventArgs e)
     {
@@ -308,13 +365,27 @@ public partial class MainWindow : Window
     private async void Import_Click(object sender, RoutedEventArgs e)
     {
         if (busy) return;
-        var dialog = new OpenFileDialog { Filter = "Профили PlanetVPN / Xray (*.json)|*.json", Title = "Импорт decoded-payload.json или Xray-конфига" };
+        var dialog = new OpenFileDialog
+        {
+            Filter = "VPN-профили (*.json;*.ovpn;*.conf)|*.json;*.ovpn;*.conf|Xray JSON (*.json)|*.json|OpenVPN (*.ovpn)|*.ovpn|WireGuard (*.conf)|*.conf",
+            Title = "Добавить VPN-профиль"
+        };
         if (dialog.ShowDialog() != true) return;
         try
         {
             if (new FileInfo(dialog.FileName).Length > 4_000_000) throw new InvalidDataException("Слишком большой файл.");
-            if (dirty && !await SaveAsync()) return;
-            await InvokeAsync(new("import", ImportJson: await File.ReadAllTextAsync(dialog.FileName)), reload: true);
+            string format = Path.GetExtension(dialog.FileName);
+            string contents = await File.ReadAllTextAsync(dialog.FileName);
+            string? user = null, password = null;
+            if (format.Equals(".ovpn", StringComparison.OrdinalIgnoreCase) && ServerProfiles.NeedsOpenVpnCredentials(contents))
+            {
+                var credentials = new OpenVpnCredentialsWindow(this);
+                if (credentials.ShowDialog() != true) return;
+                user = credentials.Username;
+                password = credentials.Password;
+            }
+            await InvokeAsync(new("import", ImportJson: contents, ImportFormat: format,
+                ImportName: Path.GetFileNameWithoutExtension(dialog.FileName), ImportUser: user, ImportPassword: password));
         }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Ошибка импорта"); }
     }

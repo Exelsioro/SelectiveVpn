@@ -138,6 +138,68 @@ async Task CheckEngine(JsonObject config, string name)
     File.Delete(path);
 }
 await CheckEngine(offline, "offline"); await CheckEngine(online, "online");
+var ovpnProvider = """
+    client
+    dev tun
+    proto tcp-client
+    remote ovpn.example 443
+    auth-user-pass
+    redirect-gateway def1
+    <ca>
+    TEST CA
+    </ca>
+    """;
+Check(ServerProfiles.NeedsOpenVpnCredentials(ovpnProvider), "OpenVPN import recognizes interactive authentication");
+var externalOpenVpn = ServerProfiles.Import(ovpnProvider, ".ovpn", "External OpenVPN", "test-user", "test-pass").Single();
+Check(externalOpenVpn.Protocols.SequenceEqual([VpnProtocol.OpenVpnTcp])
+    && externalOpenVpn.Port == 443
+    && externalOpenVpn.OpenVpnConfigs[VpnProtocol.OpenVpnTcp].Contains("<auth-user-pass>", StringComparison.Ordinal)
+    && !externalOpenVpn.OpenVpnConfigs[VpnProtocol.OpenVpnTcp].Contains("redirect-gateway", StringComparison.Ordinal),
+    "OpenVPN profile selects TCP, adds inline credentials and ignores global routes");
+Reject(() => ServerProfiles.Import(ovpnProvider, ".ovpn", "Requires login"), "OpenVPN rejects missing interactive credentials");
+try
+{
+    ServerProfiles.Import(ovpnProvider + "\nup unsafe-script", ".ovpn", "Unsafe", "test-user", "test-pass");
+    throw new Exception("FAILED unsafe OpenVPN configuration accepted");
+}
+catch (InvalidDataException) { Check(true, "OpenVPN importer does not allow script directives"); }
+
+string wgKey1 = Convert.ToBase64String(Enumerable.Repeat((byte)7, 32).ToArray());
+string wgKey2 = Convert.ToBase64String(Enumerable.Repeat((byte)13, 32).ToArray());
+var wgProvider = $"""
+    [Interface]
+    PrivateKey = {wgKey1}
+    Address = 10.17.1.9/24, fd00:1234::9/64
+    DNS = 10.17.1.1
+    MTU = 1360
+    [Peer]
+    PublicKey = {wgKey2}
+    AllowedIPs = 0.0.0.0/0, ::/0
+    Endpoint = wg.example:51820
+    PersistentKeepalive = 25
+    """;
+var externalWireGuard = ServerProfiles.Import(wgProvider, ".conf", "External WireGuard").Single();
+Check(externalWireGuard.Protocols.SequenceEqual([VpnProtocol.WireGuard])
+    && externalWireGuard.WireGuard?.Addresses.First() == "10.17.1.9/24"
+    && externalWireGuard.WireGuard?.KeepaliveSeconds == 25,
+    "WireGuard import preserves the interface address and peer settings");
+Reject(() => ServerProfiles.Import(wgProvider.Replace("[Peer]", "PostUp = unsafe-script\n[Peer]"), ".conf", "Unsafe"),
+    "WireGuard importer rejects script hooks");
+var catalogProfile = sample with { Id = "pool-54", PoolId = 54 };
+var saved = ServerProfiles.Merge([externalOpenVpn, catalogProfile], [externalWireGuard]);
+var updatedCatalog = ServerProfiles.Merge(saved, [catalogProfile with { Name = "Updated" }]);
+Check(updatedCatalog.Select(profile => profile.Id).SequenceEqual(saved.Select(profile => profile.Id))
+    && updatedCatalog[1].Name == "Updated", "PlanetVPN refresh preserves imported entries and list order");
+Check(!ServerProfiles.Merge(saved, [catalogProfile], [54]).Any(profile => profile.PoolId == 54),
+    "a manually deleted PlanetVPN location stays hidden");
+Check(ServerProfiles.Import(wgProvider, ".conf", "External WireGuard").Single().Id == externalWireGuard.Id,
+    "reimport updates an existing profile without duplicating it");
+var wireGuardConfig = EngineConfig.Build(settings, externalWireGuard, true, probe, protocol: VpnProtocol.WireGuard);
+Check(wireGuardConfig["endpoints"]![0]!["tag"]?.ToString() == "vpn"
+    && wireGuardConfig["route"]!["rules"]![0]!["action"]?.ToString() == "reject",
+    "WireGuard is routed as a VPN endpoint with new peer-initiated traffic blocked");
+await CheckEngine(wireGuardConfig, "wireguard-import");
+
 var domainOnly = EngineConfig.Build(new() { Rules = [Rule(RuleKind.DomainSuffix, "chatgpt.com")] }, sample, true, probe);
 var domainDns = domainOnly["dns"]!["rules"]!.AsArray();
 Check(domainDns.Count == 3

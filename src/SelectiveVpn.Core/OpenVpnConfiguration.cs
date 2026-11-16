@@ -3,7 +3,7 @@ namespace SelectiveVpn.Core;
 public static class OpenVpnConfiguration
 {
     private static readonly HashSet<string> Allowed = new(StringComparer.OrdinalIgnoreCase)
-    { "client", "dev", "proto", "remote", "resolv-retry", "nobind", "persist-key", "persist-tun", "remote-cert-tls", "tls-cipher", "tls-ciphersuites", "verb", "cipher", "data-ciphers", "data-ciphers-fallback", "auth", "key-direction", "scramble", "auth-nocache", "tun-mtu", "mssfix", "explicit-exit-notify", "remote-random", "connect-timeout", "connect-retry", "connect-retry-max" };
+    { "client", "dev", "proto", "remote", "resolv-retry", "nobind", "persist-key", "persist-tun", "remote-cert-tls", "verify-x509-name", "tls-version-min", "tls-version-max", "reneg-sec", "sndbuf", "rcvbuf", "fast-io", "float", "mute", "pull", "tls-cipher", "tls-ciphersuites", "verb", "cipher", "data-ciphers", "data-ciphers-fallback", "auth", "key-direction", "scramble", "auth-nocache", "tun-mtu", "mssfix", "explicit-exit-notify", "remote-random", "connect-timeout", "connect-retry", "connect-retry-max" };
     public static string Validate(string text)
     {
         if (text.Length > 100_000) throw new InvalidDataException("OpenVPN-конфигурация слишком большая.");
@@ -19,7 +19,7 @@ public static class OpenVpnConfiguration
                 lines.Add(line); continue;
             }
             if (line.Length == 0 || line.StartsWith('#') || line.StartsWith(';')) continue;
-            if (line is "<ca>" or "<cert>" or "<key>" or "<tls-crypt>" or "<tls-auth>") { block = line[1..^1]; lines.Add(line); continue; }
+            if (line is "<ca>" or "<cert>" or "<key>" or "<tls-crypt>" or "<tls-auth>" or "<tls-crypt-v2>" or "<auth-user-pass>") { block = line[1..^1]; lines.Add(line); continue; }
             string keyword = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)[0];
             if (!Allowed.Contains(keyword)) throw new InvalidDataException("Недопустимая директива OpenVPN: " + keyword);
             // Lifecycle and verbosity are controlled by our service.
