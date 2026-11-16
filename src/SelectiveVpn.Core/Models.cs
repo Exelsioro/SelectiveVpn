@@ -23,12 +23,18 @@ public sealed record ClientSettings
     public bool AutoConnect { get; set; }
     public bool ConnectOnLogon { get; set; }
     public bool DiagnosticLogging { get; set; }
+    public bool BlockVpnDomainsWhenDisconnected { get; set; }
     public string? SelectedServerId { get; set; }
     public VpnProtocol Protocol { get; set; } = VpnProtocol.Auto;
     public string? LastSuccessfulServerId { get; set; }
     public VpnProtocol? LastSuccessfulProtocol { get; set; }
     public RouteTarget DefaultRoute { get; set; } = RouteTarget.Direct;
     public List<RoutingRule> Rules { get; set; } = [];
+    [JsonIgnore]
+    public bool NeedsDisconnectedDomainFilter => BlockVpnDomainsWhenDisconnected && Rules.Any(
+        rule => rule.Enabled && rule.Target == RouteTarget.Vpn &&
+            rule.Kind is RuleKind.Domain or RuleKind.DomainSuffix);
+
     [JsonIgnore]
     public string[] ProtectedApplications => Rules.Where(r => r.Enabled && r.Kind == RuleKind.Application && r.Target == RouteTarget.Vpn)
         .Select(r => r.Value).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -49,7 +55,7 @@ public sealed record ServerInfo(string Id, string Name, string Address, int Port
     [JsonIgnore] public string DisplayName => Address.Length == 0 ? Name : $"{Name} — {Address}:{Port}";
 }
 public sealed record StatusSnapshot(TunnelState State, string Message, bool ProtectionActive,
-    int ProtectedApplications, ClientSettings Settings, ServerInfo[] Servers, string[] Events, ConnectionStats? Connection = null);
+    int ProtectedApplications, ClientSettings Settings, ServerInfo[] Servers, string[] Events, ConnectionStats? Connection = null, bool DisconnectedDomainFilterActive = false);
 public sealed record ConnectionStats(DateTimeOffset? ConnectedSince, DateTimeOffset? LastReconnectedAt, int SuccessfulConnections, int ReconnectAttempts, int Failures, DateTimeOffset? LastFailureAt, string? LastFailure, DateTimeOffset? NextRetryAt, double TotalConnectedSeconds);
 public sealed record RpcRequest(string Command, ClientSettings? Settings = null, string? ImportJson = null, string? ServerId = null, VpnProtocol? Protocol = null);
 public sealed record ProviderSettings(string ConnectionKeyBase64);

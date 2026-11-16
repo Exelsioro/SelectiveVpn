@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
@@ -335,13 +335,14 @@ try {
         $script:testSettings.selectedServerId=$ServerId
         $script:testSettings | Add-Member -NotePropertyName DiagnosticLogging -NotePropertyValue $true -Force
         $script:testSettings | Add-Member -NotePropertyName ConnectOnLogon -NotePropertyValue $false -Force
+        $script:testSettings | Add-Member -NotePropertyName BlockVpnDomainsWhenDisconnected -NotePropertyValue $false -Force
         $script:testSettings.protocol='Auto'
         $script:testSettings.defaultRoute='Direct'
         $script:testSettings.rules=@($script:preservedBlocks)
         Write-Settings ($script:testSettings | ConvertTo-Json -Depth 32 -Compress)
         $s=Start-TestService
         Write-Json 'initial-status.json' $s
-        if ($null -eq $s.connection) {throw 'Installed service lacks connection statistics; update it before this test'}
+        if ($null -eq $s.connection -or !$s.PSObject.Properties['disconnectedDomainFilterActive']) {throw 'Update the installed SelectiveVpn service before this test'}
         Assert-Check 'Idle service' ($s.state -eq 'Disconnected') $s.message
         Assert-Check 'No idle TUN' (@(Get-NetAdapter | Where-Object { $_.Name -eq 'SelectiveVpn-TUN' -and $_.Status -eq 'Up' }).Count -eq 0) 'No active SelectiveVpn-TUN expected'
         $script:directProbe=Join-Path $script:run 'direct-probe.exe'
@@ -358,6 +359,19 @@ try {
         $appRule=Rule 'Application' $script:vpnProbe
         Save-TestRules @($appRule) 'offline-policy' $false
         Check-Blocked 'Blocked while disconnected'
+        $script:testSettings.blockVpnDomainsWhenDisconnected=$true
+        $testDomain=Rule 'DomainSuffix' 'cloudflare.com'
+        Save-TestRules @($appRule,$testDomain) 'offline-domain-policy' $false
+        $s=Rpc @{command='status'}
+        Assert-Check 'Offline domain filter running' ($s.state -eq 'Disconnected' -and $s.disconnectedDomainFilterActive) $s.message
+        $blockedDomain=Probe $script:directProbe 'offline-domain-blocked' 'https://www.cloudflare.com/cdn-cgi/trace'
+        $unlisted=Probe $script:directProbe 'offline-direct-available' 'https://1.1.1.1/cdn-cgi/trace'
+        Assert-Check 'VPN domain blocked while disconnected' (!$blockedDomain.success) 'Listed domain must fail for the unprotected app'
+        Assert-Check 'Unlisted traffic available while disconnected' ($unlisted.success -and $unlisted.ip -eq $base.ip) 'Unlisted destination must retain direct egress'
+        $script:testSettings.blockVpnDomainsWhenDisconnected=$false
+        Save-TestRules @($appRule) 'offline-domain-filter-disabled' $false
+        $s=Rpc @{command='status'}
+        Assert-Check 'Offline domain filter disabled' (!$s.disconnectedDomainFilterActive) $s.message
         $null=Rpc @{command='connect'}
         Wait-Connected 'Initial connection'
         Snapshot 'connected'

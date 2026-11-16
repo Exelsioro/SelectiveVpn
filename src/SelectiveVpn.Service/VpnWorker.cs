@@ -20,6 +20,7 @@ public sealed class VpnWorker : BackgroundService
     private CancellationTokenSource? connectionCancel;
     private Task connectionTask = Task.CompletedTask;
     private bool requestedOnline;
+    private volatile bool disconnectedDomainFilter;
     private VpnProtocol activeProtocol;
     private DateTime retryAt;
     private DateTimeOffset? connectedSince, lastReconnectedAt, lastFailureAt;
@@ -42,7 +43,8 @@ public sealed class VpnWorker : BackgroundService
         using var localTransport = transport = new OpenVpnProcess(Path.Combine(AppContext.BaseDirectory, "runtime", "openvpn", "openvpn.exe"), store, Log);
         guard.ReplaceProtectedApplications(settings.ProtectedApplications);
         await HostNetwork.CleanupOwnRoutesAsync();
-        SetState(TunnelState.Disconnected, "VPN отключён; сетевой движок остановлен. Защищённые приложения заблокированы.");
+        await StartDisconnectedFilterAsync();
+        SetState(TunnelState.Disconnected, "VPN отключён. Защищённые приложения заблокированы.");
         if (settings.AutoConnect) QueueConnect();
         try { await Task.WhenAll(ListenAsync(stoppingToken), MonitorAsync(stoppingToken), MonitorLogonsAsync(stoppingToken)); }
         finally
@@ -131,12 +133,19 @@ public sealed class VpnWorker : BackgroundService
                 store.SaveSettings(next); settings = next;
                 guard.ReplaceProtectedApplications(settings.ProtectedApplications);
                 if (requestedOnline) QueueConnect();
+                else
+                {
+                    if (disconnectedDomainFilter) await StopNetworkAsync();
+                    await StartDisconnectedFilterAsync();
+                }
                 Log("Правила и протокол сохранены.");
                 break;
             case "connect": QueueConnect(); break;
             case "disconnect":
-                requestedOnline = false; await StopNetworkAsync();
-                SetState(TunnelState.Disconnected, "VPN отключён. TUN и DNS-перехват остановлены; защищённые приложения заблокированы.");
+                requestedOnline = false;
+                await StopNetworkAsync();
+                await StartDisconnectedFilterAsync();
+                SetState(TunnelState.Disconnected, "VPN отключён. Защищённые приложения заблокированы.");
                 break;
             default: throw new ArgumentException("Неизвестная команда.");
         }
@@ -156,22 +165,34 @@ public sealed class VpnWorker : BackgroundService
             await gate.WaitAsync(token);
             try { await ConnectAsync(token); }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
-            { await StopNetworkAsync(); SetState(TunnelState.Disconnected, "Подключение отменено; сетевой движок остановлен"); }
+            {
+                await StopNetworkAsync();
+                await StartDisconnectedFilterAsync();
+                SetState(TunnelState.Disconnected, "Подключение отменено.");
+            }
             catch (Exception ex)
-            { Failure(ex.Message); await StopNetworkAsync(); retryAt = DateTime.UtcNow.AddSeconds(60); SetState(TunnelState.Faulted, ex.Message); }
+            {
+                Failure(ex.Message);
+                await StopNetworkAsync();
+                await StartDisconnectedFilterAsync();
+                retryAt = DateTime.UtcNow.AddSeconds(60);
+                SetState(TunnelState.Faulted, ex.Message);
+            }
             finally { gate.Release(); }
         }, CancellationToken.None);
     }
 
     private async Task ConnectAsync(CancellationToken ct)
     {
-        await StopNetworkAsync(); HostNetwork.RejectConflictingVpn();
+        if (!disconnectedDomainFilter) await StopNetworkAsync();
+        HostNetwork.RejectConflictingVpn();
         var physical = await HostNetwork.GetPhysicalAsync(ct);
         var candidates = settings.SelectedServerId is null or "recommended"
             ? await PlanetCatalog.RankAsync(servers, settings.LastSuccessfulServerId, ct)
             : servers.Where(s => s.Id == settings.SelectedServerId).ToArray();
         if (candidates.Length == 0) throw new InvalidOperationException("Список серверов пуст. Нажмите «Обновить серверы».");
         if (settings.Protocol != VpnProtocol.Auto && candidates.All(s => !s.Protocols.Contains(settings.Protocol))) throw new InvalidOperationException("Выбранный протокол отсутствует в конфигурации сервера. Выберите другой протокол или «Авто».");
+        if (disconnectedDomainFilter) await StopNetworkAsync();
         foreach (var server in candidates)
         {
             var protocols = settings.Protocol == VpnProtocol.Auto
@@ -206,8 +227,31 @@ public sealed class VpnWorker : BackgroundService
         throw new IOException("Серверы и протоколы не прошли проверку. Сеть восстановлена; защищённые приложения заблокированы. Причины — в журнале ниже.");
     }
 
+    private async Task StartDisconnectedFilterAsync()
+    {
+        if (!settings.NeedsDisconnectedDomainFilter || serviceToken.IsCancellationRequested) return;
+        try
+        {
+            HostNetwork.RejectConflictingVpn();
+            var physical = await HostNetwork.GetPhysicalAsync(serviceToken);
+            // Only explicit VPN rules block traffic here. Unmatched traffic remains direct.
+            var offlineSettings = settings with { DefaultRoute = RouteTarget.Direct };
+            await engine.StartAsync(offlineSettings, null, false, serviceToken, physicalInterface: physical.Name);
+            disconnectedDomainFilter = true;
+            Log("Фильтр VPN-доменов запущен без туннеля.");
+        }
+        catch (OperationCanceledException) when (serviceToken.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Log("Не удалось запустить фильтр VPN-доменов: " + ex.Message);
+            try { await StopNetworkAsync(); }
+            catch (Exception cleanup) { Log("Не удалось очистить маршруты фильтра: " + cleanup.Message); }
+        }
+    }
+
     private async Task StopNetworkAsync()
     {
+        disconnectedDomainFilter = false;
         guard.CloseTunnel();
         if (connectedSince is not null) { totalConnectedSeconds += System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds; connectedSince=null; }
         try { engine.Stop(); }
@@ -223,8 +267,24 @@ public sealed class VpnWorker : BackgroundService
             try
             {
                 if (state == TunnelState.Connected && (!engine.Running || (activeProtocol != VpnProtocol.VlessReality && !transport.Running) || !await engine.ProbeAsync(ct)))
-                { Failure("Проверка доступности или процесс VPN завершились с ошибкой"); await StopNetworkAsync(); SetState(TunnelState.Faulted, "Соединение потеряно; TUN остановлен, защищённые приложения заблокированы."); retryAt = DateTime.UtcNow.AddSeconds(30); }
+                {
+                    Failure("Проверка доступности или процесс VPN завершились с ошибкой");
+                    await StopNetworkAsync();
+                    await StartDisconnectedFilterAsync();
+                    retryAt = DateTime.UtcNow.AddSeconds(30);
+                    SetState(TunnelState.Faulted, "Соединение потеряно. Защищённые приложения заблокированы.");
+                }
                 else if (state == TunnelState.Faulted && requestedOnline && DateTime.UtcNow >= retryAt) QueueConnect();
+                else if (state is TunnelState.Disconnected or TunnelState.Faulted &&
+                    settings.NeedsDisconnectedDomainFilter && (!disconnectedDomainFilter || !engine.Running))
+                {
+                    if (disconnectedDomainFilter)
+                    {
+                        Log("Движок фильтра VPN-доменов завершился. Перезапуск.");
+                        await StopNetworkAsync();
+                    }
+                    await StartDisconnectedFilterAsync();
+                }
             }
             finally { gate.Release(); }
         }
@@ -246,7 +306,8 @@ public sealed class VpnWorker : BackgroundService
     private StatusSnapshot Snapshot() => new(state, message, guard.Active, settings.ProtectedApplications.Length, Wire.Clone(settings),
         new[] { new ServerInfo("recommended", "Рекомендуемый — автоматический подбор", "", 0) }.Concat(servers.Select(s => new ServerInfo(s.Id, s.Name, s.Address, s.Port, s.Protocols))).ToArray(), events.ToArray(), new ConnectionStats(connectedSince, lastReconnectedAt, successfulConnections, reconnectAttempts, failures, lastFailureAt, lastFailure,
             state == TunnelState.Faulted && requestedOnline ? new DateTimeOffset(retryAt, TimeSpan.Zero) : null,
-            totalConnectedSeconds + (connectedSince is null ? 0 : System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds)));
+            totalConnectedSeconds + (connectedSince is null ? 0 : System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds)),
+        DisconnectedDomainFilterActive: disconnectedDomainFilter);
     private void SetState(TunnelState value, string text) { state = value; message = text; Log(text); }
     private void Log(string text)
     {

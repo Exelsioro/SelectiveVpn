@@ -59,7 +59,7 @@ public static class EngineConfig
             new JsonObject { ["protocol"] = "dns", ["action"] = "hijack-dns" },
             WithTarget(new JsonObject { ["inbound"] = "probe-in" }, RouteTarget.Vpn, online)
         };
-        if (settings.ProtectedApplications.Length > 0)
+        if (settings.ProtectedApplications.Length > 0 && (online || !settings.BlockVpnDomainsWhenDisconnected))
             rules.Add(WithTarget(new JsonObject { ["process_path_regex"] = new JsonArray(".+"), ["invert"] = true }, RouteTarget.Vpn, online));
         foreach (var rule in Policy.Ordered(settings))
         {

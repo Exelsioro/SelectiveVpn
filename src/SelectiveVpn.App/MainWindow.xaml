@@ -32,7 +32,7 @@
         <TextBlock Text="Правила маршрутизации" FontWeight="SemiBold" FontSize="19"/>
         <CheckBox x:Name="AutoConnectBox" Content="При запуске службы (включая загрузку Windows)" HorizontalAlignment="Right" Checked="Changed" Unchecked="Changed"/>
       </DockPanel>
-      <WrapPanel Margin="0,0,0,8"><CheckBox x:Name="LogonBox" Content="Подключаться при входе в Windows" Checked="Changed" Unchecked="Changed" Margin="0,0,20,0"/><CheckBox x:Name="DiagnosticsBox" Content="Подробный журнал маршрутизации" Checked="Changed" Unchecked="Changed"/></WrapPanel>
+      <WrapPanel Margin="0,0,0,8"><CheckBox x:Name="LogonBox" Content="Подключаться при входе в Windows" Checked="Changed" Unchecked="Changed" Margin="0,0,20,0"/><CheckBox x:Name="DiagnosticsBox" Content="Подробный журнал маршрутизации" Checked="Changed" Unchecked="Changed" Margin="0,0,20,0"/><CheckBox x:Name="BlockDomainsBox" Content="Блокировать VPN-домены без подключения" Checked="Changed" Unchecked="Changed" ToolTip="Фильтрует распознанные домены, пока служба и сетевой фильтр работают."/></WrapPanel>
       <TextBlock Text="Приложения «Через VPN» блокируются без VPN. Приоритет: приложения → домены → IP. Внутри группы действует первое совпадение." TextWrapping="Wrap" Foreground="#526074" Margin="0,0,0,12"/>
       <Grid>
         <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="150"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

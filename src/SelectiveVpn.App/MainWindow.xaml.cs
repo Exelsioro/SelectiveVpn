@@ -105,7 +105,12 @@ public partial class MainWindow : Window
     private void ApplyStatus(StatusSnapshot status)
     {
         trayState = status.State; UpdateTray();
-        if (StatusText.Text != status.Message) StatusText.Text = status.Message;
+        string statusMessage = status.Message;
+        if (status.Settings.NeedsDisconnectedDomainFilter && status.State != TunnelState.Connected)
+            statusMessage += status.DisconnectedDomainFilterActive
+                ? " Фильтр VPN-доменов работает."
+                : " Фильтр VPN-доменов не работает.";
+        if (StatusText.Text != statusMessage) StatusText.Text = statusMessage;
         if (status.Connection is { } connection)
         {
             string Age(DateTimeOffset? date) => date is null ? "—" : TimeSpan.FromSeconds(Math.Max(0, (DateTimeOffset.UtcNow-date.Value).TotalSeconds)).ToString(@"d\.hh\:mm\:ss");
@@ -196,6 +201,7 @@ public partial class MainWindow : Window
         if (ServersBox.SelectedValue is null) ServersBox.SelectedValue = "recommended";
         ProtocolBox.SelectedValue = current.Protocol;
         DefaultBox.SelectedValue = current.DefaultRoute; AutoConnectBox.IsChecked = current.AutoConnect; LogonBox.IsChecked = current.ConnectOnLogon; DiagnosticsBox.IsChecked = current.DiagnosticLogging;
+        BlockDomainsBox.IsChecked = current.BlockVpnDomainsWhenDisconnected;
         initialized = true; loading = false; dirty = false; SetTitle();
     }
     private ClientSettings ReadSettings() => Policy.Normalize(current with
@@ -205,6 +211,7 @@ public partial class MainWindow : Window
         AutoConnect = AutoConnectBox.IsChecked == true,
         ConnectOnLogon = LogonBox.IsChecked == true,
         DiagnosticLogging = DiagnosticsBox.IsChecked == true,
+        BlockVpnDomainsWhenDisconnected = BlockDomainsBox.IsChecked == true,
         Protocol = ProtocolBox.SelectedValue is VpnProtocol protocol ? protocol : VpnProtocol.Auto,
         Rules = rows.Select(r => r.Rule).ToList()
     });
@@ -231,7 +238,7 @@ public partial class MainWindow : Window
         commandVersion++;
         pollingCancel?.Cancel();
         StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = false;
-        try { await ServiceControl.StopAsync(); trayState = null; UpdateTray(); StatusText.Text = "Служба остановлена. TUN выключен; блокировки выбранных приложений сохранены."; }
+        try { await ServiceControl.StopAsync(); trayState = null; UpdateTray(); StatusText.Text = "Служба остановлена. Фильтрация доменов выключена; блокировки приложений сохранены."; }
         catch (Exception ex) { MessageBox.Show(ex.Message, "Остановка службы"); }
         finally { serviceOperation = false; StartServiceButton.IsEnabled = StopServiceButton.IsEnabled = true; UpdateTray(); }
     }

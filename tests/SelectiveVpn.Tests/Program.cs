@@ -134,6 +134,18 @@ Check(domainDns.Count == 3
     "direct AAAA uses real DNS while VPN domains and IPv4 retain synthetic addresses");
 Check(online["dns"]!["rules"]!.AsArray().Count == 1, "application and CIDR rules retain synthetic IPv6");
 await CheckEngine(domainOnly, "domain-only-direct-ipv6");
+var offlineDomainSettings = settings with { BlockVpnDomainsWhenDisconnected = true };
+Check(!settings.NeedsDisconnectedDomainFilter && offlineDomainSettings.NeedsDisconnectedDomainFilter
+    && !(offlineDomainSettings with { Rules = [Rule(RuleKind.Application, @"C:\Browser\browser.exe")] }).NeedsDisconnectedDomainFilter,
+    "offline filter is opt-in and requires an enabled VPN domain");
+var offlineDomainFilter = EngineConfig.Build(offlineDomainSettings, null, false, probe);
+var filterRules = offlineDomainFilter["route"]!["rules"]!.AsArray();
+Check(filterRules.Any(rule => rule?["domain_suffix"]?[0]?.ToString() == "xn--e1afmkfd.xn--p1ai"
+    && rule["action"]?.ToString() == "reject")
+    && filterRules.Last()!["outbound"]?.ToString() == "direct"
+    && !filterRules.Any(rule => rule?["invert"]?.GetValue<bool>() == true),
+    "offline filter rejects VPN domains and preserves the direct fallback");
+await CheckEngine(offlineDomainFilter, "disabled-vpn-domain-filter");
 
 var bound = EngineConfig.Build(settings, sample, true, probe, tun: false, physicalInterface: "Ethernet");
 Check(bound["inbounds"]!.AsArray().All(n => n!["type"]!.ToString() != "tun"), "preflight cannot install a TUN");
