@@ -85,7 +85,7 @@ public static class EngineConfig
             ["dns"] = new JsonObject
             {
                 ["servers"] = dnsServers,
-                ["rules"] = new JsonArray(new JsonObject { ["inbound"] = "tun-in", ["query_type"] = new JsonArray("A", "AAAA"), ["action"] = "route", ["server"] = "fakeip" }),
+                ["rules"] = BuildDnsRules(settings),
                 ["final"] = online ? "dns-vpn" : "dns-direct"
             },
             ["inbounds"] = inbounds, ["outbounds"] = outbounds,
@@ -96,6 +96,39 @@ public static class EngineConfig
             }
         };
     }
+
+
+    private static JsonArray BuildDnsRules(ClientSettings settings)
+    {
+        var rules = new JsonArray();
+        var orderedRules = Policy.Ordered(settings).ToArray();
+
+        // Chrome treats synthetic IPv6 addresses in fc00::/7 as local network resources.
+        // With domain-only routing we can return real AAAA records for direct destinations.
+        // App and IP rules can change the route after DNS, so keep their synthetic answers.
+        if (settings.DefaultRoute == RouteTarget.Direct &&
+            orderedRules.All(rule => rule.Kind is RuleKind.Domain or RuleKind.DomainSuffix))
+        {
+            foreach (var rule in orderedRules)
+            {
+                var match = ResolveTunAddresses(rule.Target == RouteTarget.Direct ? "dns-direct" : "fakeip", "AAAA");
+                string field = rule.Kind == RuleKind.Domain ? "domain" : "domain_suffix";
+                match[field] = new JsonArray(rule.Value);
+                rules.Add(match);
+            }
+            rules.Add(ResolveTunAddresses("dns-direct", "AAAA"));
+        }
+        rules.Add(ResolveTunAddresses("fakeip", "A", "AAAA"));
+        return rules;
+    }
+
+    private static JsonObject ResolveTunAddresses(string server, params string[] queryTypes) => new()
+    {
+        ["inbound"] = "tun-in",
+        ["query_type"] = new JsonArray(queryTypes.Select(type => (JsonNode?)JsonValue.Create(type)).ToArray()),
+        ["action"] = "route",
+        ["server"] = server
+    };
 
     private static JsonObject WithTarget(JsonObject rule, RouteTarget target, bool online)
     {

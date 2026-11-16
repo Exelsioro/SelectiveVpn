@@ -123,6 +123,18 @@ async Task CheckEngine(JsonObject config, string name)
     File.Delete(path);
 }
 await CheckEngine(offline, "offline"); await CheckEngine(online, "online");
+var domainOnly = EngineConfig.Build(new() { Rules = [Rule(RuleKind.DomainSuffix, "chatgpt.com")] }, sample, true, probe);
+var domainDns = domainOnly["dns"]!["rules"]!.AsArray();
+Check(domainDns.Count == 3
+    && domainDns[0]!["domain_suffix"]![0]!.ToString() == "chatgpt.com"
+    && domainDns[0]!["server"]!.ToString() == "fakeip"
+    && domainDns[1]!["query_type"]![0]!.ToString() == "AAAA"
+    && domainDns[1]!["server"]!.ToString() == "dns-direct"
+    && domainDns[2]!["server"]!.ToString() == "fakeip",
+    "direct AAAA uses real DNS while VPN domains and IPv4 retain synthetic addresses");
+Check(online["dns"]!["rules"]!.AsArray().Count == 1, "application and CIDR rules retain synthetic IPv6");
+await CheckEngine(domainOnly, "domain-only-direct-ipv6");
+
 var bound = EngineConfig.Build(settings, sample, true, probe, tun: false, physicalInterface: "Ethernet");
 Check(bound["inbounds"]!.AsArray().All(n => n!["type"]!.ToString() != "tun"), "preflight cannot install a TUN");
 Check(bound["outbounds"]![0]!["bind_interface"]!.ToString() == "Ethernet" && bound["outbounds"]![1]!["bind_interface"]!.ToString() == "Ethernet", "both direct and VLESS sockets bind physical interface");
