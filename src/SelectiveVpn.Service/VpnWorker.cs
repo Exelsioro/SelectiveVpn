@@ -187,6 +187,7 @@ public sealed class VpnWorker : BackgroundService
         if (!disconnectedDomainFilter) await StopNetworkAsync();
         HostNetwork.RejectConflictingVpn();
         var physical = await HostNetwork.GetPhysicalAsync(ct);
+        var directIPv6Available = await CheckDirectIPv6Async(physical, ct);
         var candidates = settings.SelectedServerId is null or "recommended"
             ? await PlanetCatalog.RankAsync(servers, settings.LastSuccessfulServerId, ct)
             : servers.Where(s => s.Id == settings.SelectedServerId).ToArray();
@@ -207,9 +208,9 @@ public sealed class VpnWorker : BackgroundService
                     string? vpnInterface = null;
                     if (protocol != VpnProtocol.VlessReality)
                     { await transport.StartAsync(server, protocol, physical, ct); vpnInterface = OpenVpnProcess.InterfaceName; }
-                    await engine.StartAsync(settings, server, true, ct, tun: false, physicalInterface: physical.Name, vpnInterface: vpnInterface);
+                    await engine.StartAsync(settings, server, true, ct, tun: false, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available);
                     if (!await engine.ProbeAsync(ct)) throw new IOException("HTTPS через VPN недоступен.");
-                    await engine.StartAsync(settings, server, true, ct, tun: true, physicalInterface: physical.Name, vpnInterface: vpnInterface);
+                    await engine.StartAsync(settings, server, true, ct, tun: true, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available);
                     if (!await engine.ProbeAsync(ct)) throw new IOException("Проверка после запуска TUN не прошла.");
                     guard.OpenTunnel(Wire.InterfaceName); activeProtocol = protocol;
                     connectedSince = DateTimeOffset.UtcNow;
@@ -227,6 +228,13 @@ public sealed class VpnWorker : BackgroundService
         throw new IOException("Серверы и протоколы не прошли проверку. Сеть восстановлена; защищённые приложения заблокированы. Причины — в журнале ниже.");
     }
 
+    private async Task<bool> CheckDirectIPv6Async(PhysicalNetwork physical, CancellationToken ct)
+    {
+        bool available = await HostNetwork.CanReachPublicIPv6Async(physical, ct);
+        Log(available ? "Прямой IPv6 доступен." : "Прямой IPv6 недоступен. Для прямых доменов используется IPv4.");
+        return available;
+    }
+
     private async Task StartDisconnectedFilterAsync()
     {
         if (!settings.NeedsDisconnectedDomainFilter || serviceToken.IsCancellationRequested) return;
@@ -236,7 +244,8 @@ public sealed class VpnWorker : BackgroundService
             var physical = await HostNetwork.GetPhysicalAsync(serviceToken);
             // Only explicit VPN rules block traffic here. Unmatched traffic remains direct.
             var offlineSettings = settings with { DefaultRoute = RouteTarget.Direct };
-            await engine.StartAsync(offlineSettings, null, false, serviceToken, physicalInterface: physical.Name);
+            var directIPv6Available = await CheckDirectIPv6Async(physical, serviceToken);
+            await engine.StartAsync(offlineSettings, null, false, serviceToken, physicalInterface: physical.Name, directIPv6Available: directIPv6Available);
             disconnectedDomainFilter = true;
             Log("Фильтр VPN-доменов запущен без туннеля.");
         }

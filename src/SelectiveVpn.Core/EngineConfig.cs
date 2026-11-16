@@ -6,7 +6,7 @@ public sealed record ProbeEndpoint(int Port, string Username, string Password);
 
 public static class EngineConfig
 {
-    public static JsonObject Build(ClientSettings rawSettings, ServerProfile? server, bool online, ProbeEndpoint probe, bool tun = true, string? physicalInterface = null, string? vpnInterface = null)
+    public static JsonObject Build(ClientSettings rawSettings, ServerProfile? server, bool online, ProbeEndpoint probe, bool tun = true, string? physicalInterface = null, string? vpnInterface = null, bool directIPv6Available = true)
     {
         var settings = Policy.Normalize(rawSettings);
         if (online && server is null) throw new ArgumentException("Выберите сервер.");
@@ -25,6 +25,8 @@ public static class EngineConfig
         });
         var outbounds = new JsonArray(new JsonObject { ["type"] = "direct", ["tag"] = "direct" });
         if (physicalInterface is not null) outbounds[0]!["bind_interface"] = physicalInterface;
+        if (!directIPv6Available)
+            outbounds[0]!["domain_resolver"] = new JsonObject { ["server"] = "dns-direct", ["strategy"] = "ipv4_only" };
         if (online && vpnInterface is not null) outbounds.Add(new JsonObject
         {
             ["type"] = "direct", ["tag"] = "vpn", ["bind_interface"] = vpnInterface,
@@ -85,7 +87,7 @@ public static class EngineConfig
             ["dns"] = new JsonObject
             {
                 ["servers"] = dnsServers,
-                ["rules"] = BuildDnsRules(settings),
+                ["rules"] = BuildDnsRules(settings, directIPv6Available),
                 ["final"] = online ? "dns-vpn" : "dns-direct"
             },
             ["inbounds"] = inbounds, ["outbounds"] = outbounds,
@@ -98,7 +100,7 @@ public static class EngineConfig
     }
 
 
-    private static JsonArray BuildDnsRules(ClientSettings settings)
+    private static JsonArray BuildDnsRules(ClientSettings settings, bool directIPv6Available)
     {
         var rules = new JsonArray();
         var orderedRules = Policy.Ordered(settings).ToArray();
@@ -106,21 +108,31 @@ public static class EngineConfig
         // Chrome treats synthetic IPv6 addresses in fc00::/7 as local network resources.
         // With domain-only routing we can return real AAAA records for direct destinations.
         // App and IP rules can change the route after DNS, so keep their synthetic answers.
-        if (settings.DefaultRoute == RouteTarget.Direct &&
-            orderedRules.All(rule => rule.Kind is RuleKind.Domain or RuleKind.DomainSuffix))
+        if (orderedRules.All(rule => rule.Kind is RuleKind.Domain or RuleKind.DomainSuffix))
         {
             foreach (var rule in orderedRules)
             {
-                var match = ResolveTunAddresses(rule.Target == RouteTarget.Direct ? "dns-direct" : "fakeip", "AAAA");
+                var match = rule.Target == RouteTarget.Direct
+                    ? DirectAAAA(directIPv6Available) : ResolveTunAddresses("fakeip", "AAAA");
                 string field = rule.Kind == RuleKind.Domain ? "domain" : "domain_suffix";
                 match[field] = new JsonArray(rule.Value);
                 rules.Add(match);
             }
-            rules.Add(ResolveTunAddresses("dns-direct", "AAAA"));
+            if (settings.DefaultRoute == RouteTarget.Direct) rules.Add(DirectAAAA(directIPv6Available));
         }
         rules.Add(ResolveTunAddresses("fakeip", "A", "AAAA"));
         return rules;
     }
+
+    private static JsonObject DirectAAAA(bool available) => available
+        ? ResolveTunAddresses("dns-direct", "AAAA")
+        : new JsonObject
+        {
+            ["inbound"] = "tun-in",
+            ["query_type"] = new JsonArray("AAAA"),
+            ["action"] = "predefined",
+            ["rcode"] = "NOERROR"
+        };
 
     private static JsonObject ResolveTunAddresses(string server, params string[] queryTypes) => new()
     {

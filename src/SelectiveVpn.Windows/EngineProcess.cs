@@ -25,7 +25,7 @@ public sealed class EngineProcess : IDisposable
     public EngineProcess(string executable, SecureStore store, Action<string> log)
     { this.executable = executable; this.store = store; this.log = log; }
 
-    public async Task StartAsync(ClientSettings settings, ServerProfile? server, bool online, CancellationToken ct, bool tun = true, string? physicalInterface = null, string? vpnInterface = null)
+    public async Task StartAsync(ClientSettings settings, ServerProfile? server, bool online, CancellationToken ct, bool tun = true, string? physicalInterface = null, string? vpnInterface = null, bool directIPv6Available = true)
     {
         Stop();
         lastError = "";
@@ -38,7 +38,7 @@ public sealed class EngineProcess : IDisposable
         listener.Stop();
         probe = new(port, "health", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)));
         var configPath = Path.Combine(store.Root, "engine.json");
-        store.Write("engine.json", Encoding.UTF8.GetBytes(EngineConfig.Build(settings, server, online, probe, tun, physicalInterface, vpnInterface).ToJsonString()));
+        store.Write("engine.json", Encoding.UTF8.GetBytes(EngineConfig.Build(settings, server, online, probe, tun, physicalInterface, vpnInterface, directIPv6Available).ToJsonString()));
         var checkInfo = StartInfo("check", configPath);
         using (var check = Process.Start(checkInfo) ?? throw new InvalidOperationException("Engine check failed to start."))
         {
@@ -67,7 +67,7 @@ public sealed class EngineProcess : IDisposable
                 if (line.Contains("ERROR", StringComparison.Ordinal) || line.Contains("FATAL", StringComparison.Ordinal)) log("Движок: " + line);
             };
             process.OutputDataReceived += receive; process.ErrorDataReceived += receive;
-            store.AppendLog("engine.log", $"START pid={process.Id} tun={tun} server={server?.Id} physical={physicalInterface} vpn={vpnInterface} debug={settings.DiagnosticLogging}");
+            store.AppendLog("engine.log", $"START pid={process.Id} tun={tun} server={server?.Id} physical={physicalInterface} vpn={vpnInterface} directIPv6={directIPv6Available} debug={settings.DiagnosticLogging}");
             process.BeginOutputReadLine(); process.BeginErrorReadLine();
             var until = DateTime.UtcNow.AddSeconds(12);
             while (DateTime.UtcNow < until)

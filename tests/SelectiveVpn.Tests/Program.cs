@@ -134,6 +134,21 @@ Check(domainDns.Count == 3
     "direct AAAA uses real DNS while VPN domains and IPv4 retain synthetic addresses");
 Check(online["dns"]!["rules"]!.AsArray().Count == 1, "application and CIDR rules retain synthetic IPv6");
 await CheckEngine(domainOnly, "domain-only-direct-ipv6");
+var unavailableIPv6 = EngineConfig.Build(new()
+{
+    Rules = [Rule(RuleKind.DomainSuffix, "chatgpt.com"), Rule(RuleKind.Domain, "direct.example", RouteTarget.Direct)]
+}, sample, true, probe, directIPv6Available: false);
+var unavailableDns = unavailableIPv6["dns"]!["rules"]!.AsArray();
+Check(unavailableDns[0]!["server"]?.ToString() == "fakeip"
+    && unavailableDns[1]!["action"]?.ToString() == "predefined"
+    && unavailableDns[2]!["action"]?.ToString() == "predefined"
+    && unavailableDns[2]!["rcode"]?.ToString() == "NOERROR"
+    && unavailableDns[3]!["server"]?.ToString() == "fakeip",
+    "unavailable direct IPv6 only suppresses AAAA for direct domains");
+Check(unavailableIPv6["outbounds"]![0]!["domain_resolver"]!["strategy"]?.ToString() == "ipv4_only"
+    && unavailableIPv6["outbounds"]![1]!["domain_resolver"] is null,
+    "unavailable direct IPv6 limits DNS resolution for the direct outbound only");
+await CheckEngine(unavailableIPv6, "unavailable-direct-ipv6");
 var offlineDomainSettings = settings with { BlockVpnDomainsWhenDisconnected = true };
 Check(!settings.NeedsDisconnectedDomainFilter && offlineDomainSettings.NeedsDisconnectedDomainFilter
     && !(offlineDomainSettings with { Rules = [Rule(RuleKind.Application, @"C:\Browser\browser.exe")] }).NeedsDisconnectedDomainFilter,
