@@ -95,6 +95,21 @@ Reject(() => Policy.NormalizeApplication("browser.exe"), "relative executable re
 Reject(() => Policy.NormalizeCidr("10.0.0.1/33"), "invalid network prefix rejected");
 Reject(() => Policy.Normalize(new() { Rules = [Rule(RuleKind.Domain, "EXAMPLE.COM"), Rule(RuleKind.Domain, "example.com")] }), "ambiguous duplicate rejected");
 Check(!Policy.ProcessRegex(@"C:\Program Files\x.exe").Contains(@"\ "), "process regex compatible with RE2 spaces");
+var notices = new List<string>();
+var diagnostics = new EngineDiagnostics(notices.Add);
+const string timestamp = "+0300 2026-11-16 04:35:35 ";
+const string directTimeout = "ERROR [7 5.0s] connection: open connection to 203.0.113.5:6881 using outbound/direct[direct]: dial tcp 203.0.113.5:6881: i/o timeout";
+diagnostics.Record(timestamp + "DEBUG [7 2ms] dns: exchanged example.com NOERROR 297");
+diagnostics.Record(timestamp + "INFO [7 0ms] router: found process path: " + @"C:\Example\utweb.exe");
+for (int i = 0; i < 500; i++) diagnostics.Record(timestamp + directTimeout);
+Check(notices.Count == 0, "DNS success and routine direct timeouts do not flood service events");
+diagnostics.Record(timestamp + directTimeout.Replace("direct[direct]", "direct[vpn]", StringComparison.Ordinal));
+diagnostics.Record("FATAL[0000] engine could not start");
+Check(notices.Count == 2, "VPN error and fatal engine error are published immediately");
+diagnostics.Flush();
+diagnostics.Flush();
+Check(notices.Count == 3 && notices[2].Contains("utweb.exe: 500", StringComparison.Ordinal),
+    "direct TCP timeouts produce one summary with the originating process");
 var probe = new ProbeEndpoint(19080, "test", "test-password");
 var offline = EngineConfig.Build(settings, null, false, probe);
 var online = EngineConfig.Build(settings, sample, true, probe);

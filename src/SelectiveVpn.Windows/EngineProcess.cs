@@ -19,7 +19,9 @@ public sealed class EngineProcess : IDisposable
     private Process? process;
     private IntPtr job;
     private ProbeEndpoint? probe;
-    private string lastError = "";
+    private EngineDiagnostics? diagnostics;
+    private Timer? diagnosticsTimer;
+    private volatile string lastError = "";
     public bool Running => process is { HasExited: false };
 
     public EngineProcess(string executable, SecureStore store, Action<string> log)
@@ -57,14 +59,16 @@ public sealed class EngineProcess : IDisposable
         {
             process = Process.Start(StartInfo("run", configPath)) ?? throw new InvalidOperationException("Engine failed to start.");
             if (!Job.AssignProcessToJobObject(job, process.Handle)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            var sessionDiagnostics = diagnostics = new EngineDiagnostics(log);
+            var interval = TimeSpan.FromMinutes(1);
+            diagnosticsTimer = new Timer(_ => sessionDiagnostics.Flush(), null, interval, interval);
             DataReceivedEventHandler receive = (_, e) =>
             {
                 if (string.IsNullOrWhiteSpace(e.Data)) return;
                 var line = SafeError(e.Data, server);
                 if (probe is not null) line = line.Replace(probe.Password, "<credential>", StringComparison.Ordinal);
-                lastError = line;
                 try { store.AppendLog("engine.log", line); } catch (IOException) { }
-                if (line.Contains("ERROR", StringComparison.Ordinal) || line.Contains("FATAL", StringComparison.Ordinal)) log("Движок: " + line);
+                if (sessionDiagnostics.Record(line)) lastError = line;
             };
             process.OutputDataReceived += receive; process.ErrorDataReceived += receive;
             store.AppendLog("engine.log", $"START pid={process.Id} tun={tun} server={server?.Id} physical={physicalInterface} vpn={vpnInterface} directIPv6={directIPv6Available} debug={settings.DiagnosticLogging}");
@@ -120,12 +124,17 @@ public sealed class EngineProcess : IDisposable
     }
     public void Stop()
     {
+        diagnosticsTimer?.Dispose();
+        diagnosticsTimer = null;
         if (job != IntPtr.Zero) { Job.CloseHandle(job); job = IntPtr.Zero; }
         if (process is not null)
         {
             if (!process.HasExited) { process.Kill(true); process.WaitForExit(5000); }
+            if (process.HasExited) process.WaitForExit();
             process.Dispose(); process = null;
         }
+        diagnostics?.Flush(final: true);
+        diagnostics = null;
         probe = null;
         var config = Path.Combine(store.Root, "engine.json");
         if (File.Exists(config)) File.Delete(config);
