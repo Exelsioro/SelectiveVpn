@@ -12,7 +12,10 @@ internal static class Program
     [STAThread] private static int Main(string[] args)
     {
         int code=1;
-        var app=new Application { ShutdownMode=ShutdownMode.OnExplicitShutdown };
+#pragma warning disable WPF0001 // Tests mirror ThemeMode="Dark" from App.xaml.
+        var app=new Application { ShutdownMode=ShutdownMode.OnExplicitShutdown, ThemeMode=ThemeMode.Dark };
+#pragma warning restore WPF0001
+        app.Resources.MergedDictionaries.Add(new() { Source = new Uri("/SelectiveVpn.App;component/Graphite.xaml", UriKind.Relative) });
         var window=new MainWindow(); window.StartInTray();
         app.Dispatcher.InvokeAsync(async () => {
             try {

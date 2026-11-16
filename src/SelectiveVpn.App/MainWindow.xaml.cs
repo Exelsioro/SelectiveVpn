@@ -17,6 +17,7 @@ public partial class MainWindow : Window
     {
         public string KindLabel => Rule.Kind switch { RuleKind.Application => "Приложение", RuleKind.Domain => "Домен", RuleKind.DomainSuffix => "Домен и поддомены", _ => "IP / CIDR" };
         public string TargetLabel => Rule.Target == RouteTarget.Vpn ? "Через VPN" : "Напрямую";
+        public string EnabledLabel => Rule.Enabled ? "Включено" : "Выключено";
     }
     private readonly ObservableCollection<RuleRow> rows = [];
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(3) };
@@ -30,7 +31,29 @@ public partial class MainWindow : Window
     private TunnelState? trayState;
     private bool exitRequested, systemEnding;
     private void ShowFromTray() { Show(); if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal; Activate(); }
-    private void UpdateTray() => tray?.Update(trayState, busy || serviceOperation);
+    private void UpdateTray()
+    {
+        bool commandBusy = busy || serviceOperation;
+        tray?.Update(trayState, commandBusy);
+        var (label, brush) = trayState switch
+        {
+            TunnelState.Connected => ("VPN подключён", "ActionBrush"),
+            TunnelState.Connecting => ("Подключение VPN", "WarningBrush"),
+            TunnelState.Starting => ("Запуск службы", "WarningBrush"),
+            TunnelState.Stopping => ("Остановка службы", "WarningBrush"),
+            TunnelState.Faulted => ("Сбой подключения", "ErrorBrush"),
+            TunnelState.Disconnected => ("VPN отключён", "MutedBrush"),
+            _ => ("Служба недоступна", "MutedBrush")
+        };
+        if (ConnectionStateText.Text != label) ConnectionStateText.Text = label;
+        ConnectionDot.Fill = (System.Windows.Media.Brush)FindResource(brush);
+        ConnectButton.IsEnabled = initialized && !commandBusy &&
+            trayState is TunnelState.Disconnected or TunnelState.Faulted;
+        DisconnectButton.IsEnabled = initialized && !commandBusy &&
+            trayState is TunnelState.Connected or TunnelState.Connecting or TunnelState.Faulted;
+        SaveButton.IsEnabled = initialized && dirty && !commandBusy && trayState is not null;
+        if (trayState is not TunnelState.Connected) SessionText.Text = "";
+    }
     private void ExitFromTray() { exitRequested = true; Close(); }
     private async void ConnectFromTray()
     {
@@ -105,7 +128,9 @@ public partial class MainWindow : Window
     private void ApplyStatus(StatusSnapshot status)
     {
         trayState = status.State; UpdateTray();
-        string statusMessage = status.Message;
+        const string connectedPrefix = "Подключено: ";
+        string statusMessage = status.State == TunnelState.Connected && status.Message.StartsWith(connectedPrefix, StringComparison.Ordinal)
+            ? status.Message[connectedPrefix.Length..] : status.Message;
         if (status.Settings.NeedsDisconnectedDomainFilter && status.State != TunnelState.Connected)
             statusMessage += status.DisconnectedDomainFilterActive
                 ? " Фильтр VPN-доменов работает."
@@ -114,7 +139,8 @@ public partial class MainWindow : Window
         if (status.Connection is { } connection)
         {
             string Age(DateTimeOffset? date) => date is null ? "—" : TimeSpan.FromSeconds(Math.Max(0, (DateTimeOffset.UtcNow-date.Value).TotalSeconds)).ToString(@"d\.hh\:mm\:ss");
-            ConnectionStatsText.Text = $"Подключены: {Age(connection.ConnectedSince)} · Последнее переподключение: {Age(connection.LastReconnectedAt)} назад\nЗа запуск службы: подключений {connection.SuccessfulConnections}, попыток переподключения {connection.ReconnectAttempts}, сбоев {connection.Failures}, всего в VPN {TimeSpan.FromSeconds(connection.TotalConnectedSeconds):d\\.hh\\:mm\\:ss}" +
+            SessionText.Text = connection.ConnectedSince is { } since ? $"В сети {Age(since)}" : "";
+            ConnectionStatsText.Text = $"Подключены: {Age(connection.ConnectedSince)} · Последнее переподключение: {(connection.LastReconnectedAt is null ? "—" : Age(connection.LastReconnectedAt) + " назад")}\nЗа запуск службы: подключений {connection.SuccessfulConnections}, попыток переподключения {connection.ReconnectAttempts}, сбоев {connection.Failures}, всего в VPN {TimeSpan.FromSeconds(connection.TotalConnectedSeconds):d\\.hh\\:mm\\:ss}" +
                 (connection.LastFailure is null ? "" : $" · Последний сбой: {connection.LastFailureAt?.ToLocalTime():HH:mm:ss} — {connection.LastFailure}") +
                 (connection.NextRetryAt is null ? "" : $" · Следующая попытка: {connection.NextRetryAt.Value.ToLocalTime():HH:mm:ss}");
         }
@@ -156,7 +182,7 @@ public partial class MainWindow : Window
             if (!busy && version == commandVersion && !lifetime.IsCancellationRequested)
             {
                 trayState = null; UpdateTray();
-                StatusText.Text = "Служба остановлена или недоступна. Нажмите «Запустить службу». Защищённые приложения остаются заблокированными.";
+                StatusText.Text = "Служба недоступна. Её можно запустить во вкладке «Настройки».";
             }
         }
         finally { pollingCancel = null; polling = false; }
@@ -170,7 +196,7 @@ public partial class MainWindow : Window
         ServersBox.IsEnabled = false;
         ProtocolBox.IsEnabled = false;
         SaveButton.IsEnabled = false;
-        RuleEditor.IsEnabled = RuleActions.IsEnabled = false;
+        RuleEditor.IsEnabled = RuleActions.IsEnabled = DomainSettings.IsEnabled = StartupSettings.IsEnabled = DiagnosticsBox.IsEnabled = false;
         try
         {
             var response = await Task.Run(() => PipeRpc.CallAsync(request, lifetime.Token), lifetime.Token);
@@ -178,7 +204,7 @@ public partial class MainWindow : Window
             if (response.Status is { } status)
             {
                 ApplyStatus(status);
-                if (!initialized || reload) LoadSettings(status);
+                if (response.Success && (!initialized || reload)) LoadSettings(status);
             }
             if (!response.Success) throw new InvalidOperationException(response.Error);
             return true;
@@ -190,7 +216,12 @@ public partial class MainWindow : Window
             if (showError) MessageBox.Show(ex.Message, "SelectiveVpn", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-        finally { RuleEditor.IsEnabled = RuleActions.IsEnabled = true; busy = false; ProtocolBox.IsEnabled = initialized; ServersBox.IsEnabled = initialized; SaveButton.IsEnabled = initialized; UpdateTray(); }
+        finally
+        {
+            busy = false;
+            UpdateEditorAvailability();
+            UpdateTray();
+        }
     }
     private void LoadSettings(StatusSnapshot status)
     {
@@ -202,7 +233,9 @@ public partial class MainWindow : Window
         ProtocolBox.SelectedValue = current.Protocol;
         DefaultBox.SelectedValue = current.DefaultRoute; AutoConnectBox.IsChecked = current.AutoConnect; LogonBox.IsChecked = current.ConnectOnLogon; DiagnosticsBox.IsChecked = current.DiagnosticLogging;
         BlockDomainsBox.IsChecked = current.BlockVpnDomainsWhenDisconnected;
-        initialized = true; loading = false; dirty = false; SetTitle();
+        initialized = true; loading = false; dirty = false;
+        UpdateEditorAvailability();
+        UpdateDraftStatus();
     }
     private ClientSettings ReadSettings() => Policy.Normalize(current with
     {
@@ -309,6 +342,23 @@ public partial class MainWindow : Window
     private void Move(int delta)
     { int index = RulesGrid.SelectedIndex; if (index >= 0 && index + delta >= 0 && index + delta < rows.Count) { rows.Move(index, index + delta); RulesGrid.SelectedIndex = index + delta; MarkDirty(); } }
     private void Changed(object sender, RoutedEventArgs e) { if (!loading && initialized) MarkDirty(); }
-    private void MarkDirty() { dirty = true; SetTitle(); }
-    private void SetTitle() => Title = "SelectiveVpn — маршрутизация приложений" + (dirty ? " • не сохранено" : "");
+    private void UpdateEditorAvailability()
+    {
+        bool enabled = initialized && !busy;
+        RuleEditor.IsEnabled = RuleActions.IsEnabled = DiagnosticsBox.IsEnabled = enabled;
+        DomainSettings.IsEnabled = StartupSettings.IsEnabled = enabled;
+        ProtocolBox.IsEnabled = ServersBox.IsEnabled = enabled;
+    }
+    private void MarkDirty()
+    {
+        dirty = true;
+        UpdateDraftStatus();
+    }
+    private void UpdateDraftStatus()
+    {
+        Title = dirty ? "SelectiveVpn • не сохранено" : "SelectiveVpn";
+        DraftText.Text = dirty ? "Есть несохранённые изменения" : "Все изменения сохранены";
+        DraftText.Foreground = (System.Windows.Media.Brush)FindResource(dirty ? "WarningBrush" : "MutedBrush");
+        UpdateTray();
+    }
 }
