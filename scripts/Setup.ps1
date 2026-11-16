@@ -13,11 +13,14 @@ function Test-Package {
         if ($required -notin $entries.Path) { throw "Missing manifest entry: $required" }
     }
     $runtime = Join-Path $root 'artifacts\publish\Service\runtime'
-    $openvpnManifest = Join-Path $runtime 'openvpn\manifest.json'
-    if (Test-Path -LiteralPath (Split-Path -Parent $openvpnManifest)) {
-        $openvpn = Get-Content -LiteralPath $openvpnManifest -Raw | ConvertFrom-Json
+    foreach ($name in @('openvpn-community','openvpn')) {
+        $directory = Join-Path $runtime $name
+        if ($name -eq 'openvpn' -and !(Test-Path -LiteralPath $directory)) { continue }
+        $openvpn = Get-Content -LiteralPath (Join-Path $directory 'manifest.json') -Raw | ConvertFrom-Json
         foreach ($entry in $openvpn.PSObject.Properties) {
-            if ((Get-FileHash -LiteralPath (Join-Path $runtime ('openvpn\' + $entry.Name)) -Algorithm SHA256).Hash -ne $entry.Value) { throw "OpenVPN component mismatch: $($entry.Name)" }
+            if ((Get-FileHash -LiteralPath (Join-Path $directory $entry.Name) -Algorithm SHA256).Hash -ne $entry.Value) {
+                throw "OpenVPN component mismatch: $($entry.Name)"
+            }
         }
     }
     if ((Get-FileHash -LiteralPath (Join-Path $runtime 'sing-box.exe') -Algorithm SHA256).Hash -ne '8F30682EE198855440D2A7FE070D5D3653793B2D01BB8C85EEA88F93BBE7C8B9') { throw 'sing-box checksum mismatch.' }

@@ -3,12 +3,12 @@ using System.Text;
 
 namespace SelectiveVpn.Windows;
 
-// The verified provider DLL is x86. Keep its adapter handle in a matching helper;
+// Keep the adapter handle in a helper that matches the Wintun DLL architecture;
 // closing stdin (including parent termination) releases the adapter.
 public sealed class WintunAdapterProcess : IDisposable
 {
     private Process? process;
-    public async Task StartAsync(string dll, CancellationToken ct)
+    public async Task StartAsync(string dll, bool use64BitHelper, CancellationToken ct)
     {
         Dispose();
         var dllLiteral = dll.Replace("\"", "\"\"");
@@ -26,7 +26,7 @@ public sealed class WintunAdapterProcess : IDisposable
             "$h=[SelectiveWintun]::WintunCreateAdapter('SelectiveVpn-OpenVPN','SelectiveVpn', [IntPtr]::Zero); " +
             "if($h -eq [IntPtr]::Zero) { throw ('WintunCreateAdapter: ' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()) }; " +
             "try { [Console]::WriteLine('READY'); [Console]::Out.Flush(); [Console]::ReadLine() | Out-Null } finally { [SelectiveWintun]::WintunCloseAdapter($h) }";
-        var info = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"))
+        var info = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), use64BitHelper ? "System32" : "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe"))
         { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) }) info.ArgumentList.Add(arg);
         process = Process.Start(info)!;

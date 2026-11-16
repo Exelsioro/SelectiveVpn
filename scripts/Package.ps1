@@ -9,6 +9,7 @@ if (!$PublicRelease) {
     if (!$providerData.ConnectionKeyBase64 -or [Convert]::FromBase64String($providerData.ConnectionKeyBase64).Length -eq 0) { throw 'Invalid provider bootstrap.' }
 }
 if (!$SkipBuild) { & (Join-Path $PSScriptRoot 'Build.ps1') -WithoutOpenVpn:$PublicRelease }
+& (Join-Path $PSScriptRoot 'Get-OpenVpnCommunity.ps1')
 $version = Get-Date -Format 'yyyyMMdd-HHmmss'
 $output = Join-Path $root 'artifacts\packages'
 $package = Join-Path $output "SelectiveVpn-win-x64-$version"
@@ -25,6 +26,13 @@ if ($PublicRelease) {
     Copy-Item -LiteralPath (Join-Path $published 'Service\runtime\sing-box.exe') -Destination $runtime.FullName
 } else {
     Copy-Item -Path (Join-Path $published '*') -Destination $destination -Recurse
+}
+$community = Join-Path $root 'runtime\openvpn-community'
+$bundledCommunity = New-Item -ItemType Directory -Path (Join-Path $destination 'Service\runtime\openvpn-community') -Force
+$communityManifest = Join-Path $community 'manifest.json'
+$communityFiles = (Get-Content -LiteralPath $communityManifest -Raw | ConvertFrom-Json).PSObject.Properties.Name
+foreach ($name in @('manifest.json') + $communityFiles) {
+    Copy-Item -LiteralPath (Join-Path $community $name) -Destination $bundledCommunity.FullName -Force
 }
 foreach ($script in @('Install.ps1','Uninstall.ps1','Setup.ps1','Test-Installed.ps1','ServiceRpc.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $package 'scripts')

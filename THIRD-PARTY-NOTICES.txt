@@ -14,7 +14,20 @@ https://github.com/dotnet/extensions/blob/main/LICENSE.TXT
 PlanetVPN profiles are user-provided local data. They are not part of this Git repository.
 This is an independent personal client, not an official PlanetVPN application.
 
-OpenVPN 2.6.12 XOR executable and dependencies are copied unchanged from the user's local PlanetVPN installation, verified against scripts/openvpn-manifest.json.
+OpenVPN Community Edition 2.6.23 (Windows x64, installer revision I002) runs
+as a separate process. The upstream signed installer and SHA-256 checks for the
+unmodified extracted files are recorded in scripts/Get-OpenVpnCommunity.ps1 and
+scripts/openvpn-community-manifest.json.
+Release: https://github.com/OpenVPN/openvpn/releases/tag/v2.6.23
+Corresponding OpenVPN source: https://swupdate.openvpn.org/community/releases/openvpn-2.6.23.tar.gz
+Windows build recipes: https://github.com/OpenVPN/openvpn-build/tree/release/2.6/windows-msi
+OpenSSL 3.6.5: https://github.com/openssl/openssl/releases/tag/openssl-3.6.5
+The runtime contains the license from the upstream OpenVPN MSI.
+
+Wintun 0.14.1 is distributed as the upstream signed x64 DLL with its prebuilt
+binaries license. Official archive and source links: https://www.wintun.net/
+
+The private OpenVPN 2.6.12 XOR executable and dependencies are copied unchanged from the user's local PlanetVPN installation, verified against scripts/openvpn-manifest.json.
 Upstream OpenVPN: https://github.com/OpenVPN/openvpn/tree/v2.6.12 (GPL-2.0).
 Modified source referenced by the bundled runtime README: https://github.com/hexaedron/openvpn_xorpatch_2.6.12
 OpenSSL: https://github.com/openssl/openssl (Apache-2.0).

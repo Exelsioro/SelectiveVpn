@@ -1,6 +1,6 @@
 # SelectiveVpn
 
-Независимый VPN-клиент для Windows x64: .NET 10, служба Windows и WPF-интерфейс. Получает конфигурации бесплатных локаций PlanetVPN через API. Поддерживает **VLESS / REALITY**, **OpenVPN UDP/TCP**, **OpenVPN XOR UDP/TCP** и автоматический перебор. Маршрутизацию выполняет sing-box 1.14.4, OpenVPN — проверенный движок из локальной установки PlanetVPN. Оригинальный PlanetVPN.exe для работы не запускается; рекламных компонентов в клиенте нет.
+Независимый VPN-клиент для Windows x64: .NET 10, служба Windows и WPF-интерфейс. Получает конфигурации бесплатных локаций PlanetVPN через API. Поддерживает **VLESS / REALITY**, **OpenVPN UDP/TCP**, **OpenVPN XOR UDP/TCP** и автоматический перебор. Маршрутизацию выполняет sing-box 1.14.4, обычный OpenVPN — OpenVPN Community Edition. Для профилей PlanetVPN с XOR поддерживается отдельно установленный совместимый движок. Оригинальный PlanetVPN.exe для работы не запускается; рекламных компонентов в клиенте нет.
 
 ## Возможности
 
@@ -72,7 +72,7 @@ WFP-фильтры привязаны к пути исполняемого фа�
 
 ## Сборка и проверки
 
-Для сборки нужен .NET SDK 10.0.401 (Windows x64). Скрипт скачивает закреплённый sing-box и проверяет SHA256 архива и EXE. OpenVPN и его DLL берутся из `D:\PlanetVPN\bin\openvpn`, сверяются с `scripts/openvpn-manifest.json`; другой исходный каталог можно передать в `Get-OpenVpn.ps1 -Source`. WireGuard и IKEv2 в этой версии не реализованы.
+Для сборки нужен .NET SDK 10.0.401 (Windows x64). Публичная сборка скачивает sing-box, OpenVPN Community Edition и Wintun и проверяет SHA-256. Для личного комплекта файл Get-OpenVpn.ps1 берёт OpenVPN XOR из локальной установки PlanetVPN. Другой каталог можно передать через -Source.
 
 ```powershell
 .\scripts\Build.ps1
@@ -156,7 +156,7 @@ UI показывает длительность текущего подключ
 
 ## Установка и обновление
 
-Скачайте `SelectiveVpn-Setup-win-x64.exe` из [последнего релиза](https://github.com/Exelsioro/SelectiveVpn/releases/latest). Для обновления завершите интерфейс через «Выход» в трее и запустите EXE. Установщик сохранит профили и правила. На чистой установке добавьте свой конфиг VLESS/REALITY или WireGuard на вкладке «Серверы». Обновление сохраняет ранее установленный проверенный движок OpenVPN и настройки PlanetVPN.
+Скачайте `SelectiveVpn-Setup-win-x64.exe` из [последнего релиза](https://github.com/Exelsioro/SelectiveVpn/releases/latest). Для обновления завершите интерфейс через «Выход» в трее и запустите EXE. Установщик сохранит профили и правила. На чистой установке импортируйте OpenVPN `.ovpn`, VLESS/REALITY или WireGuard на вкладке «Серверы». OpenVPN Community Edition уже входит в EXE. Обновление сохраняет настройки PlanetVPN и ранее установленный движок OpenVPN XOR.
 
 ## Сборка EXE на Inno Setup
 

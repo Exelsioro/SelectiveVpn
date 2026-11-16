@@ -37,6 +37,9 @@ try {
         if (!($zip.Entries | Where-Object { $_.FullName.Replace('\','/') -eq ($prefix + 'scripts/ServiceRpc.ps1') })) {
             throw 'The ZIP predates Inno updates. Rebuild it with scripts\Package.ps1.'
         }
+        if (!($zip.Entries | Where-Object { $_.FullName.Replace('\','/') -eq ($prefix + 'artifacts/publish/Service/runtime/openvpn-community/openvpn.exe') })) {
+            throw 'The ZIP has no OpenVPN Community runtime. Rebuild it with scripts\Package.ps1.'
+        }
         if (!$PrivateBundle -and ($zip.Entries | Where-Object {
             $_.FullName.Replace('\','/') -match '(^|/)(private|openvpn)(/|$)|\.(dpapi|ovpn|log)$'
         })) {

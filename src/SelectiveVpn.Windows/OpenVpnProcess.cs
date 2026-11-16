@@ -30,8 +30,16 @@ public sealed class OpenVpnProcess : IDisposable
         Stop();
         lastError = "";
         if (!server.OpenVpnConfigs.TryGetValue(protocol, out var text)) throw new InvalidOperationException("Сервер не поддерживает выбранный OpenVPN-протокол.");
-        if (!File.Exists(executable)) throw new InvalidOperationException("Движок OpenVPN не установлен. Используйте личный комплект с OpenVPN или выберите профиль VLESS/REALITY или WireGuard.");
-        string directory = Path.GetDirectoryName(executable)!;
+        string legacyDirectory = Path.GetDirectoryName(executable)!;
+        string communityExecutable = Path.Combine(Path.GetDirectoryName(legacyDirectory)!, "openvpn-community", "openvpn.exe");
+        bool requiresLegacy = protocol is VpnProtocol.OpenVpnXorUdp or VpnProtocol.OpenVpnXorTcp
+            || text.Split('\n').Any(line => line.TrimStart().StartsWith("scramble ", StringComparison.OrdinalIgnoreCase));
+        bool hasLegacy = File.Exists(executable);
+        bool useCommunity = !requiresLegacy && File.Exists(communityExecutable) && (!hasLegacy || server.PoolId is null);
+        string engine = useCommunity ? communityExecutable : executable;
+        if (!File.Exists(engine))
+            throw new InvalidOperationException(requiresLegacy ? "Для профиля OpenVPN XOR требуется совместимый движок." : "Движок OpenVPN не установлен. Обновите SelectiveVpn.");
+        string directory = Path.GetDirectoryName(engine)!;
         var hashes = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(Path.Combine(directory, "manifest.json")))!;
         foreach (var (name, expected) in hashes)
         {
@@ -44,11 +52,12 @@ public sealed class OpenVpnProcess : IDisposable
         store.Write("management.password", Encoding.ASCII.GetBytes(password + "\n"));
         var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop();
-        var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = store.Root,
+        var info = new ProcessStartInfo(engine) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = store.Root,
             RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
         foreach (var arg in new[] { "--config", Path.Combine(store.Root, "transport.ovpn"), "--windows-driver", "wintun", "--dev-node", InterfaceName,
             "--route-nopull", "--route-noexec", "--script-security", "1", "--verb", "3", "--resolv-retry", "3", "--hand-window", "12",
             "--connect-retry-max", "1", "--local", physical.Address, "--lport", "0", "--management", "127.0.0.1", port.ToString(), Path.Combine(store.Root, "management.password"), "--management-hold", "--management-signal" }) info.ArgumentList.Add(arg);
+        if (useCommunity) info.ArgumentList.Add("--disable-dco");
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var authenticated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var notifications = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -63,7 +72,7 @@ public sealed class OpenVpnProcess : IDisposable
         }
         try
         {
-            await adapter.StartAsync(Path.Combine(directory, "wintun.dll"), ct);
+            await adapter.StartAsync(Path.Combine(directory, "wintun.dll"), useCommunity, ct);
             process = Process.Start(info)!;
             process.OutputDataReceived += (_, e) => Receive(e.Data); process.ErrorDataReceived += (_, e) => Receive(e.Data);
             process.BeginOutputReadLine(); process.BeginErrorReadLine();
