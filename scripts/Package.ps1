@@ -21,8 +21,13 @@ Copy-Item -LiteralPath (Join-Path $root 'THIRD-PARTY-NOTICES.txt') -Destination 
 Copy-Item -LiteralPath (Join-Path $root 'runtime\sing-box-1.14.4-windows-amd64\LICENSE') -Destination (Join-Path $package 'licenses\sing-box-LICENSE.txt')
 @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Setup.ps1"
-if errorlevel 1 pause
+setlocal
+echo Starting SelectiveVpn setup...
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Setup.ps1"
+if errorlevel 1 (
+    echo Setup did not complete. See install.log next to INSTALL.cmd if it was created.
+    pause
+)
 '@ | Set-Content -LiteralPath (Join-Path $package 'INSTALL.cmd') -Encoding Ascii
 # Only explicitly selected provider bootstrap is packaged: no logs, DPAPI, personal rules or dumps.
 $manifest = foreach ($file in Get-ChildItem -LiteralPath $package -Recurse -File | Sort-Object FullName) {

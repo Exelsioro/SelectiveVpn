@@ -6,12 +6,16 @@ $source = Join-Path $root 'artifacts\publish'
 $destination = Join-Path $env:ProgramFiles 'SelectiveVpn'
 if (!(Test-Path -LiteralPath (Join-Path $source 'Service\SelectiveVpn.Service.exe'))) { throw 'Run scripts\Build.ps1 first.' }
 $existing = Get-Service -Name SelectiveVpn -ErrorAction SilentlyContinue
-if ($existing) { Stop-Service -Name SelectiveVpn -Force; $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30)) }
 $uiPath = Join-Path $destination 'App\SelectiveVpn.App.exe'
 foreach ($ui in @(Get-Process -Name SelectiveVpn.App -ErrorAction SilentlyContinue)) {
     if ($ui.Path -eq $uiPath) {
-        if (!$ui.CloseMainWindow() -or !$ui.WaitForExit(10000)) { throw 'Exit SelectiveVpn using the tray menu (save pending edits) before updating. The window close button only hides it.' }
+        throw 'Exit SelectiveVpn from the tray menu before updating. Save any pending edits first.'
     }
+}
+Write-Host 'Copying SelectiveVpn and the VPN engines...'
+if ($existing -and $existing.Status -ne 'Stopped') {
+    Stop-Service -Name SelectiveVpn -Force
+    $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
 }
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
 $acl = New-Object Security.AccessControl.DirectorySecurity
@@ -34,11 +38,31 @@ if ($Profiles) {
 }
 if (!$Provider) { $candidate = Join-Path $root 'private\provider-bootstrap.json'; if (Test-Path -LiteralPath $candidate) { $Provider = $candidate } }
 if ($Provider) {
+    Write-Host 'Importing provider settings...'
     & $serviceExe --import-provider (Resolve-Path -LiteralPath $Provider).Path
     if ($LASTEXITCODE -ne 0) { throw 'Provider import failed.' }
-    & $serviceExe --refresh-catalog
-    if ($LASTEXITCODE -ne 0) { Write-Warning 'Catalog update failed. Retry using the UI.' }
+    Write-Host 'Trying to download the PlanetVPN catalog (up to 45 seconds)...'
+    try {
+        $refresh = Start-Process -FilePath $serviceExe -ArgumentList '--refresh-catalog' -NoNewWindow -PassThru
+        try {
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while (!$refresh.WaitForExit(5000) -and $clock.Elapsed.TotalSeconds -lt 45) {
+                Write-Host ("Waiting for the provider ({0:F0} seconds)..." -f $clock.Elapsed.TotalSeconds)
+            }
+            $refresh.Refresh()
+            if (!$refresh.HasExited) {
+                try { $refresh.Kill() } catch { if (!$refresh.HasExited) { throw } }
+                if (!$refresh.WaitForExit(5000)) { throw 'Catalog downloader did not stop.' }
+                Write-Warning 'Catalog download timed out. Refresh PlanetVPN in the Servers tab after installation.'
+            } elseif ($refresh.ExitCode -ne 0) {
+                Write-Warning 'Catalog update failed. Refresh PlanetVPN in the Servers tab.'
+            }
+        } finally { $refresh.Dispose() }
+    } catch {
+        Write-Warning ('Could not download the catalog. Refresh PlanetVPN in the Servers tab. ' + $_.Exception.Message)
+    }
 }
+Write-Host 'Installing and starting the Windows service...'
 if (!$existing) {
     New-Service -Name SelectiveVpn -BinaryPathName ('"' + $serviceExe + '"') -DisplayName 'SelectiveVpn routing service' -StartupType Automatic -DependsOn BFE -Description 'Selective routing with persistent application kill switch.' | Out-Null
 }

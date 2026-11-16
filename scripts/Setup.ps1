@@ -27,16 +27,19 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (!$admin) {
     $command = "& '" + $PSCommandPath.Replace("'", "''") + "'"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-    $process = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded) -Wait -PassThru
+    Write-Host 'Approve the Windows administrator prompt. Installation opens in a separate console.'
+    $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Verb RunAs -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded) -Wait -PassThru
     exit $process.ExitCode
 }
 $log = Join-Path $root 'install.log'
 Start-Transcript -LiteralPath $log -Append | Out-Null
 try {
     if (![Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'This package requires Windows x64 (Intel/AMD).' }
+    Write-Host 'Checking archive files and VPN engines...'
     Test-Package
     if (Get-Process -Name SelectiveVpn.App -ErrorAction SilentlyContinue) { throw 'Exit SelectiveVpn using its tray menu before updating.' }
     & (Join-Path $PSScriptRoot 'Install.ps1') -Provider (Join-Path $root 'private\provider-bootstrap.json')
+    Write-Host 'Installation complete. Opening SelectiveVpn...'
     Start-Process (Join-Path $env:ProgramFiles 'SelectiveVpn\App\SelectiveVpn.App.exe')
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show('Installation complete. SelectiveVpn is available in the Start menu.', 'SelectiveVpn') | Out-Null
