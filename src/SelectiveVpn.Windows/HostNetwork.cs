@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
@@ -68,27 +69,117 @@ public static class HostNetwork
         catch (Exception ex) when (ex is SocketException or OperationCanceledException) { return false; }
     }
 
-    public static async Task CleanupOwnRoutesAsync()
+    private static readonly string[] OwnInterfaces = ["SelectiveVpn-TUN", "SelectiveVpn-OpenVPN"];
+
+    public static Task CleanupOnStartupAsync(Action<string> log, CancellationToken ct) =>
+        RetryCleanupAsync(token => CleanupOwnRoutesAsync(token, log),
+            [TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5)], log, ct);
+
+    internal static async Task RetryCleanupAsync(Func<CancellationToken, Task> cleanup,
+        IReadOnlyList<TimeSpan> delays, Action<string> log, CancellationToken ct)
     {
-        await PowerShellAsync("foreach($name in @('SelectiveVpn-TUN','SelectiveVpn-OpenVPN')) { $a=Get-NetAdapter -Name $name -ErrorAction SilentlyContinue; if($a) { Get-NetRoute -InterfaceIndex $a.ifIndex -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue; Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue } }; Clear-DnsClientCache", CancellationToken.None);
+        for (int attempt = 0; ; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var watch = Stopwatch.StartNew();
+            log($"Очистка сети при запуске: попытка {attempt + 1}/{delays.Count + 1}.");
+            try
+            {
+                await cleanup(ct);
+                ct.ThrowIfCancellationRequested();
+                log($"Очистка сети завершена за {watch.Elapsed.TotalSeconds:F1} с.");
+                return;
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested && (ex is TimeoutException or IOException or NetworkInformationException))
+            {
+                var detail = $"Очистка сети: попытка {attempt + 1}, {watch.Elapsed.TotalSeconds:F1} с. {ex.Message}";
+                if (attempt == delays.Count)
+                    throw new IOException(detail + " Повторы исчерпаны.", ex);
+                log(detail + $" Повтор через {delays[attempt].TotalSeconds:F0} с.");
+                await Task.Delay(delays[attempt], ct);
+            }
+        }
     }
+
+    public static async Task CleanupOwnRoutesAsync(CancellationToken ct = default, Action<string>? log = null)
+    {
+        ct.ThrowIfCancellationRequested();
+        // At boot there are usually no VPN interfaces. Avoid loading the CIM modules in that case.
+        if (!NetworkInterface.GetAllNetworkInterfaces().Any(adapter => OwnInterfaces.Contains(adapter.Name, StringComparer.OrdinalIgnoreCase)))
+        {
+            log?.Invoke("Старых VPN-адаптеров нет. Очистка маршрутов не требуется.");
+            return;
+        }
+
+        const string script = """
+            [Console]::Error.WriteLine('Get-NetAdapter')
+            $adapters = @(Get-NetAdapter | Where-Object { $_.Name -in @('SelectiveVpn-TUN','SelectiveVpn-OpenVPN') })
+            foreach ($adapter in $adapters) {
+                [Console]::Error.WriteLine('Get-NetRoute / Remove-NetRoute: ' + $adapter.Name)
+                Get-NetRoute -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+                [Console]::Error.WriteLine('Set-DnsClientServerAddress: ' + $adapter.Name)
+                Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ResetServerAddresses -ErrorAction Stop
+            }
+            """;
+        await PowerShellAsync(script, ct, "Очистка VPN-маршрутов", log);
+        FlushDnsCache();
+    }
+
+    internal static void FlushDnsCache() => DnsFlushResolverCache();
+    [DllImport("dnsapi.dll")] private static extern bool DnsFlushResolverCache();
+
     public static async Task AddOpenVpnRouteAsync(CancellationToken ct)
     {
         await PowerShellAsync("$a=Get-NetAdapter -Name 'SelectiveVpn-OpenVPN' -ErrorAction Stop; Set-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 5000; if(!(Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)) { New-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop '0.0.0.0' -RouteMetric 5000 -PolicyStore ActiveStore | Out-Null }", ct);
     }
-    public static async Task<string> PowerShellAsync(string code, CancellationToken ct)
+    public static Task<string> PowerShellAsync(string code, CancellationToken ct,
+        string operation = "Настройка сети", Action<string>? log = null) =>
+        RunPowerShellAsync(code, ct, operation, log, TimeSpan.FromSeconds(20));
+
+    internal static async Task<string> RunPowerShellAsync(string code, CancellationToken ct,
+        string operation, Action<string>? log, TimeSpan limit)
     {
         var info = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"))
         { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
         code = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " + code;
         foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(code)) }) info.ArgumentList.Add(arg);
-        using var process = Process.Start(info)!;
-        var output = process.StandardOutput.ReadToEndAsync(); var errors = process.StandardError.ReadToEndAsync();
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(20));
-        try { await process.WaitForExitAsync(timeout.Token); }
-        catch { if (!process.HasExited) process.Kill(true); throw; }
-        string error = await errors;
-        if (process.ExitCode != 0) throw new IOException("Настройка сети: " + error[..Math.Min(error.Length, 600)]);
+        ct.ThrowIfCancellationRequested();
+        var elapsed = Stopwatch.StartNew();
+        using var process = Process.Start(info) ?? throw new IOException($"{operation}: PowerShell не запущен.");
+        log?.Invoke($"{operation}: PowerShell PID {process.Id}, лимит {limit.TotalSeconds:G} с.");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var errors = process.StandardError.ReadToEndAsync();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(limit);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+            await Task.WhenAll(output, errors).WaitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) when (process.HasExited) { }
+            try { await Task.WhenAll(process.WaitForExitAsync(), output, errors).WaitAsync(TimeSpan.FromSeconds(3)); }
+            catch (TimeoutException) { }
+            if (ct.IsCancellationRequested)
+            {
+                log?.Invoke($"{operation}: отменено при остановке, PID {process.Id}, {elapsed.Elapsed.TotalSeconds:F1} с.");
+                ct.ThrowIfCancellationRequested();
+            }
+            string trace = errors.IsCompletedSuccessfully ? LastLines(errors.Result) : "";
+            throw new TimeoutException($"{operation}: PowerShell PID {process.Id}, истёк лимит {limit.TotalSeconds:G} с ({elapsed.Elapsed.TotalSeconds:F1} с). {trace}");
+        }
+
+        log?.Invoke($"{operation}: PowerShell PID {process.Id}, код {process.ExitCode}, {elapsed.Elapsed.TotalSeconds:F1} с.");
+        if (process.ExitCode != 0)
+            throw new IOException($"{operation}: PowerShell PID {process.Id}, код {process.ExitCode}. {LastLines(await errors)}");
         return (await output).Trim();
+    }
+
+    private static string LastLines(string text)
+    {
+        string tail = text.Trim();
+        return tail.Length <= 800 ? tail : tail[^800..];
     }
 }

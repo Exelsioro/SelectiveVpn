@@ -138,10 +138,9 @@ public sealed class EngineProcess : IDisposable
         probe = null;
         var config = Path.Combine(store.Root, "engine.json");
         if (File.Exists(config)) File.Delete(config);
-        DnsFlushResolverCache();
+        HostNetwork.FlushDnsCache();
     }
     public void Dispose() => Stop();
-    [DllImport("dnsapi.dll")] private static extern bool DnsFlushResolverCache();
 
     private static class Job
     {

@@ -52,6 +52,8 @@ Get-FileHash .\SelectiveVpn-win-x64-<дата>.zip -Algorithm SHA256
 Проверка распакованного комплекта без установки (PowerShell из папки комплекта):
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Setup.ps1 -CheckOnly
 
+При ошибке автозапуска службы сначала откройте service.log. Там видны попытки очистки VPN-маршрутов и её тайм-ауты. Если запуск окончательно завершился с ошибкой, проверьте журнал Windows «Приложение» и события SelectiveVpn.Service.
+
 Журнал установки: install.log в распакованной папке. Папка может находиться на рабочем столе или на любом локальном диске.
 Рабочие журналы: C:\ProgramData\SelectiveVpn\service.log, engine.log, openvpn.log.
 Кнопка «Открыть файл журнала» находится на вкладке «Диагностика».

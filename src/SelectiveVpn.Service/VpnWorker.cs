@@ -4,7 +4,7 @@ using SelectiveVpn.Windows;
 
 namespace SelectiveVpn.Service;
 
-public sealed class VpnWorker : BackgroundService
+public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
 {
     private readonly SemaphoreSlim gate = new(1);
     private readonly ConcurrentQueue<string> events = new();
@@ -36,17 +36,37 @@ public sealed class VpnWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try { await RunWorkerAsync(stoppingToken); }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        catch (Exception ex) when (stoppingToken.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Ошибка при штатной остановке SelectiveVpn.");
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical(ex, "Служба SelectiveVpn завершилась с ошибкой. Windows может применить правила восстановления.");
+            // RunWorkerAsync has already released transient network resources.
+            // A normal Host shutdown would report success and prevent SCM recovery.
+            Environment.Exit(1);
+        }
+    }
+
+    private async Task RunWorkerAsync(CancellationToken stoppingToken)
+    {
         serviceToken = stoppingToken;
-        knownSessions = LogonSessions.Read();
         store = new SecureStore();
+        try { knownSessions = LogonSessions.Read(); }
+        catch (Exception ex) { Log("Не удалось прочитать сессии Windows при запуске: " + ex.Message); }
         settings = store.LoadSettings();
         servers = ServerProfiles.Merge([], store.LoadServers(), settings.DeletedPlanetPools);
         using var localGuard = guard = new WfpGuard();
         using var localEngine = engine = new EngineProcess(Path.Combine(AppContext.BaseDirectory, "runtime", "sing-box.exe"), store, Log);
         using var localTransport = transport = new OpenVpnProcess(Path.Combine(AppContext.BaseDirectory, "runtime", "openvpn", "openvpn.exe"), store, Log);
         guard.ReplaceProtectedApplications(settings.ProtectedApplications);
-        await HostNetwork.CleanupOwnRoutesAsync();
+        await HostNetwork.CleanupOnStartupAsync(Log, stoppingToken);
+        stoppingToken.ThrowIfCancellationRequested();
         await StartDisconnectedFilterAsync();
+        stoppingToken.ThrowIfCancellationRequested();
         SetState(TunnelState.Disconnected, "VPN отключён. Защищённые приложения заблокированы.");
         if (settings.AutoConnect) QueueConnect();
         try { await Task.WhenAll(ListenAsync(stoppingToken), MonitorAsync(stoppingToken), MonitorLogonsAsync(stoppingToken)); }

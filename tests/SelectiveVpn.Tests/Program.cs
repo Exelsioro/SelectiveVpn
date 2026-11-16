@@ -83,6 +83,72 @@ int passed = 0;
 void Check(bool condition, string name) { if (!condition) throw new Exception("FAILED: " + name); Console.WriteLine("PASS " + name); passed++; }
 void Reject(Action action, string name) { try { action(); } catch (ArgumentException) { Check(true, name); return; } throw new Exception("FAILED: accepted " + name); }
 RoutingRule Rule(RuleKind kind, string value, RouteTarget target = RouteTarget.Vpn) => new() { Kind = kind, Value = value, Target = target };
+int cleanupAttempts = 0;
+var startupMessages = new List<string>();
+await HostNetwork.RetryCleanupAsync(_ =>
+{
+    if (++cleanupAttempts == 1) throw new TimeoutException("temporary CIM delay");
+    return Task.CompletedTask;
+}, [TimeSpan.Zero, TimeSpan.Zero], startupMessages.Add, CancellationToken.None);
+Check(cleanupAttempts == 2 && startupMessages.Any(message => message.Contains("temporary CIM delay", StringComparison.Ordinal)),
+    "startup cleanup retries a transient timeout and reaches readiness");
+cleanupAttempts = 0;
+try
+{
+    await HostNetwork.RetryCleanupAsync(_ =>
+    {
+        cleanupAttempts++;
+        throw new TimeoutException("persistent CIM delay");
+    }, [TimeSpan.Zero, TimeSpan.Zero], _ => { }, CancellationToken.None);
+    throw new Exception("FAILED: a permanent cleanup failure was treated as ready");
+}
+catch (IOException ex) when (ex.InnerException is TimeoutException)
+{
+    Check(cleanupAttempts == 3, "startup cleanup stops after the configured attempt budget");
+}
+using (var stopping = new CancellationTokenSource())
+{
+    cleanupAttempts = 0;
+    try
+    {
+        await HostNetwork.RetryCleanupAsync(_ =>
+        {
+            cleanupAttempts++;
+            stopping.Cancel();
+            stopping.Token.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }, [TimeSpan.Zero], _ => { }, stopping.Token);
+        throw new Exception("FAILED: cancelled cleanup was treated as ready");
+    }
+    catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+    {
+        Check(cleanupAttempts == 1, "host shutdown does not retry cancelled startup cleanup");
+    }
+}
+try
+{
+    await HostNetwork.RunPowerShellAsync("Start-Sleep -Seconds 30", CancellationToken.None, "test timeout", null,
+        TimeSpan.FromMilliseconds(350));
+    throw new Exception("FAILED: PowerShell did not time out");
+}
+catch (TimeoutException ex)
+{
+    Check(ex.Message.Contains("test timeout", StringComparison.Ordinal) && ex.Message.Contains("PID", StringComparison.Ordinal),
+        "PowerShell timeout identifies the failed operation and child process");
+}
+using (var stopping = new CancellationTokenSource())
+{
+    try
+    {
+        await HostNetwork.RunPowerShellAsync("Start-Sleep -Seconds 30", stopping.Token, "test stop",
+            line => { if (line.Contains("PID", StringComparison.Ordinal)) stopping.Cancel(); }, TimeSpan.FromSeconds(10));
+        throw new Exception("FAILED: PowerShell ignored the external stop token");
+    }
+    catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+    {
+        Check(true, "external stop cancels PowerShell without reporting a timeout");
+    }
+}
 var sample = new ServerProfile("test", "Test", "192.0.2.10", 443, "9f83cd64-d79b-43dc-84f3-2c4e010f53ea", "AICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA", "abcd", "example.com", "chrome", "xtls-rprx-vision");
 var settings = new ClientSettings { Rules = [Rule(RuleKind.DomainSuffix, "*.ПРИМЕР.РФ"), Rule(RuleKind.IpCidr, "203.0.113.99/24"), Rule(RuleKind.Application, @"C:\Program Files\Browser\browser.exe"), Rule(RuleKind.Domain, "example.com", RouteTarget.Direct)] };
 var normalized = Policy.Normalize(settings);
