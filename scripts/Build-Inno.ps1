@@ -1,4 +1,4 @@
-﻿param([string]$Iscc, [string]$Package, [switch]$SkipBuild)
+param([string]$Iscc, [string]$Package, [switch]$SkipBuild, [switch]$PrivateBundle)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
@@ -16,7 +16,7 @@ if (!$Iscc) {
 if (!$Iscc) { throw 'Install Inno Setup 6/7 or provide the path to ISCC.exe with -Iscc.' }
 
 if (!$Package) {
-    $output = & (Join-Path $PSScriptRoot 'Package.ps1') -SkipBuild:$SkipBuild -PassThru
+    $output = & (Join-Path $PSScriptRoot 'Package.ps1') -SkipBuild:$SkipBuild -PassThru -PublicRelease:(!$PrivateBundle)
     $output | Where-Object { $_ -isnot [IO.FileInfo] } | Write-Host
     $Package = ($output | Where-Object { $_ -is [IO.FileInfo] } | Select-Object -Last 1).FullName
 }
@@ -37,6 +37,11 @@ try {
         if (!($zip.Entries | Where-Object { $_.FullName.Replace('\','/') -eq ($prefix + 'scripts/ServiceRpc.ps1') })) {
             throw 'The ZIP predates Inno updates. Rebuild it with scripts\Package.ps1.'
         }
+        if (!$PrivateBundle -and ($zip.Entries | Where-Object {
+            $_.FullName.Replace('\','/') -match '(^|/)(private|openvpn)(/|$)|\.(dpapi|ovpn|log)$'
+        })) {
+            throw 'This ZIP contains files reserved for private installations.'
+        }
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $versionDll)
     } finally { $zip.Dispose() }
     $assemblyVersion = (Get-Item -LiteralPath $versionDll).VersionInfo.ProductVersion
@@ -46,9 +51,11 @@ try {
     $version = $Matches['version']
     $revision = $Matches['sha'].Substring(0, 7)
     Copy-Item -LiteralPath $Package -Destination $payload
-    & $Iscc "/DPayloadDirectory=$staging" "/DRevision=$revision" "/DProductVersion=$version" "/O$outputDirectory" (Join-Path $root 'installer\SelectiveVpn.iss')
+    $installerName = 'SelectiveVpn-Setup-win-x64'
+    if ($PrivateBundle) { $installerName += "-$revision-private" }
+    & $Iscc "/DPayloadDirectory=$staging" "/DRevision=$revision" "/DProductVersion=$version" "/O$outputDirectory" "/F$installerName" (Join-Path $root 'installer\SelectiveVpn.iss')
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE." }
-    $installer = Join-Path $outputDirectory "SelectiveVpn-Setup-win-x64-$revision.exe"
+    $installer = Join-Path $outputDirectory "$installerName.exe"
     $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
     "$hash  $([IO.Path]::GetFileName($installer))" | Set-Content -LiteralPath "$installer.sha256" -Encoding Ascii
     Write-Host "Inno Setup installer: $installer"

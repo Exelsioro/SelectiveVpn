@@ -1,4 +1,4 @@
-﻿param([switch]$CheckOnly)
+param([switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 function Test-Package {
@@ -9,17 +9,23 @@ function Test-Package {
         if (!$path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid package path.' }
         if (!(Test-Path -LiteralPath $path -PathType Leaf) -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $entry.SHA256) { throw "Missing or damaged file: $($entry.Path)" }
     }
-    foreach ($required in @('private\provider-bootstrap.json', 'scripts\Install.ps1', 'artifacts\publish\App\SelectiveVpn.App.exe', 'artifacts\publish\App\coreclr.dll', 'artifacts\publish\Service\SelectiveVpn.Service.exe', 'artifacts\publish\Service\coreclr.dll', 'artifacts\publish\Service\runtime\sing-box.exe', 'artifacts\publish\Service\runtime\openvpn\manifest.json')) {
+    foreach ($required in @('scripts\Install.ps1', 'artifacts\publish\App\SelectiveVpn.App.exe', 'artifacts\publish\App\coreclr.dll', 'artifacts\publish\Service\SelectiveVpn.Service.exe', 'artifacts\publish\Service\coreclr.dll', 'artifacts\publish\Service\runtime\sing-box.exe')) {
         if ($required -notin $entries.Path) { throw "Missing manifest entry: $required" }
     }
     $runtime = Join-Path $root 'artifacts\publish\Service\runtime'
-    $openvpn = Get-Content -LiteralPath (Join-Path $runtime 'openvpn\manifest.json') -Raw | ConvertFrom-Json
-    foreach ($entry in $openvpn.PSObject.Properties) {
-        if ((Get-FileHash -LiteralPath (Join-Path $runtime ('openvpn\' + $entry.Name)) -Algorithm SHA256).Hash -ne $entry.Value) { throw "OpenVPN component mismatch: $($entry.Name)" }
+    $openvpnManifest = Join-Path $runtime 'openvpn\manifest.json'
+    if (Test-Path -LiteralPath (Split-Path -Parent $openvpnManifest)) {
+        $openvpn = Get-Content -LiteralPath $openvpnManifest -Raw | ConvertFrom-Json
+        foreach ($entry in $openvpn.PSObject.Properties) {
+            if ((Get-FileHash -LiteralPath (Join-Path $runtime ('openvpn\' + $entry.Name)) -Algorithm SHA256).Hash -ne $entry.Value) { throw "OpenVPN component mismatch: $($entry.Name)" }
+        }
     }
     if ((Get-FileHash -LiteralPath (Join-Path $runtime 'sing-box.exe') -Algorithm SHA256).Hash -ne '8F30682EE198855440D2A7FE070D5D3653793B2D01BB8C85EEA88F93BBE7C8B9') { throw 'sing-box checksum mismatch.' }
-    $provider = Get-Content -LiteralPath (Join-Path $root 'private\provider-bootstrap.json') -Raw | ConvertFrom-Json
-    if (!$provider.ConnectionKeyBase64 -or [Convert]::FromBase64String($provider.ConnectionKeyBase64).Length -eq 0) { throw 'Invalid provider settings.' }
+    $providerPath = Join-Path $root 'private\provider-bootstrap.json'
+    if (Test-Path -LiteralPath $providerPath) {
+        $provider = Get-Content -LiteralPath $providerPath -Raw | ConvertFrom-Json
+        if (!$provider.ConnectionKeyBase64 -or [Convert]::FromBase64String($provider.ConnectionKeyBase64).Length -eq 0) { throw 'Invalid provider settings.' }
+    }
     Write-Host "Verified $($entries.Count) package files and VPN engines."
 }
 if ($CheckOnly) { Test-Package; return }
@@ -38,7 +44,7 @@ try {
     Write-Host 'Checking archive files and VPN engines...'
     Test-Package
     if (Get-Process -Name SelectiveVpn.App -ErrorAction SilentlyContinue) { throw 'Exit SelectiveVpn using its tray menu before updating.' }
-    & (Join-Path $PSScriptRoot 'Install.ps1') -Provider (Join-Path $root 'private\provider-bootstrap.json')
+    & (Join-Path $PSScriptRoot 'Install.ps1') -PreserveProvider
     Write-Host 'Installation complete. Opening SelectiveVpn...'
     Start-Process (Join-Path $env:ProgramFiles 'SelectiveVpn\App\SelectiveVpn.App.exe')
     Add-Type -AssemblyName System.Windows.Forms

@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 param([Parameter(Mandatory)][string]$Archive, [switch]$CheckOnly)
 
 $ErrorActionPreference = 'Stop'
@@ -104,6 +104,25 @@ try {
     }
     $copyStarted = $true
     & (Join-Path $package 'scripts\Install.ps1') -PreserveProvider -LeaveServiceStopped
+    $previousOpenVpn = Join-Path $backup 'Service\runtime\openvpn'
+    $installedOpenVpn = Join-Path $target 'Service\runtime\openvpn'
+    if ((Test-Path -LiteralPath $previousOpenVpn) -and !(Test-Path -LiteralPath $installedOpenVpn)) {
+        Assert-PlainPath (Split-Path -Parent $previousOpenVpn)
+        Assert-PlainPath $previousOpenVpn
+        $manifestPath = Join-Path $package 'scripts\openvpn-manifest.json'
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        New-Item -Path $installedOpenVpn -ItemType Directory | Out-Null
+        foreach ($entry in $manifest.PSObject.Properties) {
+            $file = Join-Path $previousOpenVpn $entry.Name
+            Assert-PlainPath $file
+            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $entry.Value) {
+                throw "Previously installed OpenVPN component mismatch: $($entry.Name)"
+            }
+            Copy-Item -LiteralPath $file -Destination $installedOpenVpn
+        }
+        Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $installedOpenVpn 'manifest.json')
+        Write-Host 'Preserved previously installed OpenVPN runtime.'
+    }
     if (!$existing -or $wasRunning) { Start-VpnService $reconnect }
     $committed = $true
     Write-Host 'SelectiveVpn installation verified.'

@@ -30,6 +30,7 @@ public sealed class OpenVpnProcess : IDisposable
         Stop();
         lastError = "";
         if (!server.OpenVpnConfigs.TryGetValue(protocol, out var text)) throw new InvalidOperationException("Сервер не поддерживает выбранный OpenVPN-протокол.");
+        if (!File.Exists(executable)) throw new InvalidOperationException("Движок OpenVPN не установлен. Используйте личный комплект с OpenVPN или выберите профиль VLESS/REALITY или WireGuard.");
         string directory = Path.GetDirectoryName(executable)!;
         var hashes = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(Path.Combine(directory, "manifest.json")))!;
         foreach (var (name, expected) in hashes)
