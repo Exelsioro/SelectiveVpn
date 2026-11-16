@@ -1,5 +1,5 @@
 ﻿#Requires -RunAsAdministrator
-param([string]$Profiles, [string]$Provider)
+param([string]$Profiles, [string]$Provider, [switch]$PreserveProvider, [switch]$LeaveServiceStopped)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root 'artifacts\publish'
@@ -36,7 +36,9 @@ if ($Profiles) {
     & $serviceExe --import-profiles $profilePath
     if ($LASTEXITCODE -ne 0) { throw 'Profile import failed.' }
 }
-if (!$Provider) { $candidate = Join-Path $root 'private\provider-bootstrap.json'; if (Test-Path -LiteralPath $candidate) { $Provider = $candidate } }
+$providerStore = Join-Path $env:ProgramData 'SelectiveVpn\provider.dpapi'
+if ($PreserveProvider -and (Test-Path -LiteralPath $providerStore -PathType Leaf)) { $Provider = $null }
+elseif (!$Provider) { $candidate = Join-Path $root 'private\provider-bootstrap.json'; if (Test-Path -LiteralPath $candidate) { $Provider = $candidate } }
 if ($Provider) {
     Write-Host 'Importing provider settings...'
     & $serviceExe --import-provider (Resolve-Path -LiteralPath $Provider).Path
@@ -69,7 +71,7 @@ if (!$existing) {
 & sc.exe failure SelectiveVpn reset= 86400 actions= restart/5000/restart/15000/restart/30000 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Cannot configure service recovery.' }
 & sc.exe failureflag SelectiveVpn 1 | Out-Null
-Start-Service -Name SelectiveVpn
+if (!$LeaveServiceStopped) { Start-Service -Name SelectiveVpn }
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'SelectiveVpn.lnk'))
 $shortcut.TargetPath = Join-Path $destination 'App\SelectiveVpn.App.exe'

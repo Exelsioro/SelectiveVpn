@@ -1,7 +1,14 @@
 ﻿#Requires -RunAsAdministrator
-param([switch]$RemoveApplicationBlocks)
+param([switch]$RemoveApplicationBlocks, [switch]$RequireClosedUi)
 $ErrorActionPreference = 'Stop'
 $destination = Join-Path $env:ProgramFiles 'SelectiveVpn'
+if ($RequireClosedUi) {
+    if (Get-Process -Name SelectiveVpn.App -ErrorAction SilentlyContinue) { throw 'Exit SelectiveVpn from the tray before uninstalling.' }
+    foreach ($path in @($destination, (Join-Path $destination 'App'), (Join-Path $destination 'Service'))) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Unsafe installation path: $path" }
+    }
+}
 Get-ScheduledTask -TaskName 'SelectiveVpn.UI.*' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
 $service = Get-Service -Name SelectiveVpn -ErrorAction SilentlyContinue
 if ($service) {

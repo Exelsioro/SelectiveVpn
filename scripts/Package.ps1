@@ -1,4 +1,4 @@
-﻿param([string]$Provider, [switch]$SkipBuild)
+﻿param([string]$Provider, [switch]$SkipBuild, [switch]$PassThru)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if (!$Provider) { $Provider = Join-Path $root 'private\provider-bootstrap.json' }
@@ -12,7 +12,7 @@ $package = Join-Path $output "SelectiveVpn-win-x64-$version"
 New-Item -ItemType Directory -Path $package -Force | Out-Null
 foreach ($dir in @('scripts','private','artifacts\publish','licenses')) { New-Item -ItemType Directory -Path (Join-Path $package $dir) -Force | Out-Null }
 Copy-Item -Path (Join-Path $root 'artifacts\publish\*') -Destination (Join-Path $package 'artifacts\publish') -Recurse
-foreach ($script in @('Install.ps1','Uninstall.ps1','Setup.ps1','Test-Installed.ps1')) {
+foreach ($script in @('Install.ps1','Uninstall.ps1','Setup.ps1','Test-Installed.ps1','ServiceRpc.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $package 'scripts')
 }
 Copy-Item -LiteralPath $providerFile -Destination (Join-Path $package 'private\provider-bootstrap.json')
@@ -39,3 +39,4 @@ $zip = "$package.zip"
 Compress-Archive -Path $package -DestinationPath $zip -CompressionLevel Optimal
 (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash + '  ' + (Split-Path -Leaf $zip) | Set-Content -LiteralPath "$zip.sha256" -Encoding Ascii
 Write-Host "Package: $zip"
+if ($PassThru) { Get-Item -LiteralPath $zip }
