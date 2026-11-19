@@ -2,9 +2,10 @@
 param([Parameter(Mandatory)][string]$Archive, [switch]$CheckOnly)
 
 $ErrorActionPreference = 'Stop'
+if (![Environment]::Is64BitProcess) { throw 'Run this installer with 64-bit PowerShell.' }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (!$CheckOnly -and !$admin) { throw 'Run setup as an administrator.' }
-$target = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'SelectiveVpn'))
+$target = [IO.Path]::GetFullPath((Join-Path ${env:ProgramW6432} 'SelectiveVpn'))
 $serviceExe = Join-Path $target 'Service\SelectiveVpn.Service.exe'
 $components = @('App', 'Service')
 $payload = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Archive).Path) ('SelectiveVpn-payload-' + [Guid]::NewGuid().ToString('N'))
@@ -59,6 +60,14 @@ function Start-VpnService([bool]$Reconnect) {
 }
 
 try {
+    if (!$CheckOnly) {
+        foreach ($path in @($target, (Join-Path $target 'Installer'), (Join-Path $target 'Installer\install.log'))) { Assert-PlainPath $path }
+        $maintenance = Join-Path $target 'Installer'
+        New-Item -ItemType Directory -Path $maintenance -Force | Out-Null
+        Start-Transcript -LiteralPath (Join-Path $maintenance 'install.log') -Force | Out-Null
+        $transcribing = $true
+        Write-Host "Installer preflight. Process64=$([Environment]::Is64BitProcess), target=$target"
+    }
     Expand-Archive -LiteralPath $Archive -DestinationPath $payload
     $packages = @(Get-ChildItem -LiteralPath $payload -Directory)
     if ($packages.Count -ne 1) { throw 'Expected a single package directory in the archive.' }
@@ -71,10 +80,6 @@ try {
             (Join-Path $target 'App'), (Join-Path $target 'Service'))) {
         Assert-PlainPath $path
     }
-    $maintenance = Join-Path $target 'Installer'
-    New-Item -ItemType Directory -Path $maintenance -Force | Out-Null
-    Start-Transcript -LiteralPath (Join-Path $maintenance 'install.log') -Force | Out-Null
-    $transcribing = $true
     $existing = Get-CimInstance Win32_Service -Filter "Name='SelectiveVpn'"
     if ($existing -and $existing.PathName.Trim('"') -ne $serviceExe) {
         throw 'Existing SelectiveVpn service uses a different installation path.'
@@ -128,6 +133,8 @@ try {
     Write-Host 'SelectiveVpn installation verified.'
 } catch {
     $failure = $_
+    Write-Host ("Installation failed: " + $failure.Exception.Message)
+    Write-Host $failure.ScriptStackTrace
     if ($serviceTouched) {
         try {
             Stop-VpnService

@@ -1,7 +1,7 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 param([switch]$RemoveApplicationBlocks, [switch]$RequireClosedUi)
 $ErrorActionPreference = 'Stop'
-$destination = Join-Path $env:ProgramFiles 'SelectiveVpn'
+$destination = Join-Path ${env:ProgramW6432} 'SelectiveVpn'
 if ($RequireClosedUi) {
     if (Get-Process -Name SelectiveVpn.App -ErrorAction SilentlyContinue) { throw 'Exit SelectiveVpn from the tray before uninstalling.' }
     foreach ($path in @($destination, (Join-Path $destination 'App'), (Join-Path $destination 'Service'))) {

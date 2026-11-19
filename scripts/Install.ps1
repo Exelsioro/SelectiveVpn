@@ -1,9 +1,9 @@
-﻿#Requires -RunAsAdministrator
+#Requires -RunAsAdministrator
 param([string]$Profiles, [string]$Provider, [switch]$PreserveProvider, [switch]$LeaveServiceStopped)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $root 'artifacts\publish'
-$destination = Join-Path $env:ProgramFiles 'SelectiveVpn'
+$destination = Join-Path ${env:ProgramW6432} 'SelectiveVpn'
 if (!(Test-Path -LiteralPath (Join-Path $source 'Service\SelectiveVpn.Service.exe'))) { throw 'Run scripts\Build.ps1 first.' }
 $existing = Get-Service -Name SelectiveVpn -ErrorAction SilentlyContinue
 $uiPath = Join-Path $destination 'App\SelectiveVpn.App.exe'

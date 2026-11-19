@@ -1,4 +1,4 @@
-﻿#ifndef PayloadDirectory
+#ifndef PayloadDirectory
   #error Define PayloadDirectory with the path containing SelectiveVpn-payload.zip
 #endif
 #ifndef Revision
@@ -38,8 +38,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [CustomMessages]
 russian.InstallingPayload=Установка SelectiveVpn и проверка службы. При обновлении VPN может ненадолго отключиться.
 english.InstallingPayload=Installing SelectiveVpn and checking the service. An update may temporarily disconnect the VPN.
-russian.InstallFailed=Установка не завершилась. Журнал установки: %1
-english.InstallFailed=Installation did not complete. Installation log: %1
+russian.InstallFailed=Установка не завершилась. Журнал установки: %1. Подробности запуска: %2
+english.InstallFailed=Installation did not complete. Installation log: %1. Setup log: %2
 russian.CloseUi=Закройте SelectiveVpn через пункт «Выход» в меню трея, затем повторите установку.
 english.CloseUi=Exit SelectiveVpn from the tray, then retry Setup.
 russian.UninstallFailed=Не удалось остановить службу или снять её правила. Закройте SelectiveVpn через трей и попробуйте ещё раз.
@@ -66,7 +66,10 @@ Type: dirifempty; Name: "{app}\Installer"
 [Code]
 function PowerShellPath: String;
 begin
-  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  if FileExists(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe')) then
+    Result := ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe')
+  else
+    Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -86,23 +89,23 @@ begin
   ExtractTemporaryFile('SelectiveVpn-payload.zip');
   ScriptPath := ExpandConstant('{tmp}\Install-InnoPayload.ps1');
   Archive := ExpandConstant('{tmp}\SelectiveVpn-payload.zip');
-  if not Exec(PowerShellPath, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
+  if not ExecAndLogOutput(PowerShellPath, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
       AddQuotes(ScriptPath) + ' -Archive ' + AddQuotes(Archive), ExpandConstant('{tmp}'),
-      SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    Result := FmtMessage(CustomMessage('InstallFailed'), [ExpandConstant('{app}\Installer\install.log')])
+      SW_HIDE, ewWaitUntilTerminated, ResultCode, nil) then
+    Result := FmtMessage(CustomMessage('InstallFailed'), [ExpandConstant('{app}\Installer\install.log'), ExpandConstant('{log}')])
   else if ResultCode = 12 then
     Result := CustomMessage('CloseUi')
   else if ResultCode <> 0 then
-    Result := FmtMessage(CustomMessage('InstallFailed'), [ExpandConstant('{app}\Installer\install.log')]);
+    Result := FmtMessage(CustomMessage('InstallFailed'), [ExpandConstant('{app}\Installer\install.log'), ExpandConstant('{log}')]);
 end;
 
 function InitializeUninstall: Boolean;
 var
   Code: Integer;
 begin
-  Result := Exec(PowerShellPath, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
+  Result := ExecAndLogOutput(PowerShellPath, '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' +
     AddQuotes(ExpandConstant('{app}\Installer\Uninstall.ps1')) + ' -RemoveApplicationBlocks -RequireClosedUi',
-    ExpandConstant('{app}\Installer'), SW_HIDE, ewWaitUntilTerminated, Code);
+    ExpandConstant('{app}\Installer'), SW_HIDE, ewWaitUntilTerminated, Code, nil);
   Result := Result and (Code = 0);
   if not Result then SuppressibleMsgBox(CustomMessage('UninstallFailed'), mbError, MB_OK, IDOK);
 end;
