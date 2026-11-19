@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
 using SelectiveVpn.Core;
 
 namespace SelectiveVpn.Windows;
@@ -15,6 +16,9 @@ public sealed class EngineProcess : IDisposable
     public const string ExpectedSha256 = "8F30682EE198855440D2A7FE070D5D3653793B2D01BB8C85EEA88F93BBE7C8B9";
     private readonly string executable;
     private readonly SecureStore store;
+    private readonly SecureStore logStore;
+    private readonly bool flushDnsOnStop;
+    private readonly Func<bool>? diagnosticLogging;
     private readonly Action<string> log;
     private Process? process;
     private IntPtr job;
@@ -25,23 +29,31 @@ public sealed class EngineProcess : IDisposable
     public bool Running => process is { HasExited: false };
     public string LastProbeFailure { get; private set; } = "";
 
-    public EngineProcess(string executable, SecureStore store, Action<string> log)
-    { this.executable = executable; this.store = store; this.log = log; }
+    public EngineProcess(string executable, SecureStore store, Action<string> log, SecureStore? diagnosticsStore = null, bool flushDnsOnStop = true, Func<bool>? diagnosticLogging = null)
+    { this.executable = executable; this.store = store; this.log = log; logStore = diagnosticsStore ?? store; this.flushDnsOnStop = flushDnsOnStop; this.diagnosticLogging = diagnosticLogging; }
 
-    public async Task StartAsync(ClientSettings settings, ServerProfile? server, bool online, CancellationToken ct, bool tun = true, string? physicalInterface = null, string? vpnInterface = null, bool directIPv6Available = true, VpnProtocol protocol = VpnProtocol.VlessReality)
+    public static ProbeEndpoint AllocateProbe()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return new(port, "health", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)));
+    }
+
+    public async Task StartAsync(ClientSettings settings, ServerProfile? server, bool online, CancellationToken ct, bool tun = true, string? physicalInterface = null, string? vpnInterface = null, bool directIPv6Available = true, VpnProtocol protocol = VpnProtocol.VlessReality,
+        ProbeEndpoint? fixedProbe = null, Func<ProbeEndpoint, JsonObject>? configure = null)
     {
         Stop();
         lastError = "";
         using (var file = File.OpenRead(executable))
             if (!Convert.ToHexString(SHA256.HashData(file)).Equals(ExpectedSha256, StringComparison.Ordinal))
                 throw new InvalidDataException("SHA256 сетевого движка не совпадает с проверенной версией.");
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        probe = new(port, "health", Convert.ToHexString(RandomNumberGenerator.GetBytes(24)));
+        probe = fixedProbe ?? AllocateProbe();
+        int port = probe.Port;
         var configPath = Path.Combine(store.Root, "engine.json");
-        store.Write("engine.json", Encoding.UTF8.GetBytes(EngineConfig.Build(settings, server, online, probe, tun, physicalInterface, vpnInterface, directIPv6Available, protocol).ToJsonString()));
+        var config = configure is null ? EngineConfig.Build(settings, server, online, probe, tun, physicalInterface, vpnInterface, directIPv6Available, protocol) : configure(probe);
+        store.Write("engine.json", Encoding.UTF8.GetBytes(config.ToJsonString()));
         var checkInfo = StartInfo("check", configPath);
         using (var check = Process.Start(checkInfo) ?? throw new InvalidOperationException("Engine check failed to start."))
         {
@@ -66,13 +78,14 @@ public sealed class EngineProcess : IDisposable
             DataReceivedEventHandler receive = (_, e) =>
             {
                 if (string.IsNullOrWhiteSpace(e.Data)) return;
+                if (diagnosticLogging is not null && !diagnosticLogging() && e.Data.Contains(" DEBUG ", StringComparison.Ordinal)) return;
                 var line = SafeError(e.Data, server);
                 if (probe is not null) line = line.Replace(probe.Password, "<credential>", StringComparison.Ordinal);
-                try { store.AppendLog("engine.log", line); } catch (IOException) { }
+                try { logStore.AppendLog("engine.log", line); } catch (IOException) { }
                 if (sessionDiagnostics.Record(line)) lastError = line;
             };
             process.OutputDataReceived += receive; process.ErrorDataReceived += receive;
-            store.AppendLog("engine.log", $"START pid={process.Id} tun={tun} server={server?.Id} physical={physicalInterface} vpn={vpnInterface} directIPv6={directIPv6Available} debug={settings.DiagnosticLogging}");
+            logStore.AppendLog("engine.log", $"START pid={process.Id} tun={tun} server={server?.Id} physical={physicalInterface} vpn={vpnInterface} directIPv6={directIPv6Available} debug={settings.DiagnosticLogging}");
             process.BeginOutputReadLine(); process.BeginErrorReadLine();
             var until = DateTime.UtcNow.AddSeconds(12);
             while (DateTime.UtcNow < until)
@@ -151,7 +164,7 @@ public sealed class EngineProcess : IDisposable
         probe = null;
         var config = Path.Combine(store.Root, "engine.json");
         if (File.Exists(config)) File.Delete(config);
-        HostNetwork.FlushDnsCache();
+        if (flushDnsOnStop) HostNetwork.FlushDnsCache();
     }
     public void Dispose() => Stop();
 

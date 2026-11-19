@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
@@ -171,9 +171,12 @@ function Test-Reconnection {
     $before=Rpc @{command='status'}
     $expected=Join-Path (Split-Path $serviceExe) 'runtime\sing-box.exe'
     $engines=@(Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq $expected})
-    if($engines.Count -ne 1) {throw 'Expected exactly one installed SelectiveVpn engine; crash test refused'}
-    Event "Intentional engine crash test: pid=$($engines[0].ProcessId)"
-    Stop-Process -Id $engines[0].ProcessId -Force
+    $vpnEngines=@($engines | Where-Object { $_.CommandLine -match '[\\/]vpn[\\/]engine\.json' })
+    if ($vpnEngines.Count -eq 1) { $engine=$vpnEngines[0] }
+    elseif ($engines.Count -eq 1 -and $engines[0].CommandLine -notmatch '[\\/]routing[\\/]engine\.json') { $engine=$engines[0] }
+    else { throw 'Could not identify exactly one VPN backend; crash test refused.' }
+    Event "Intentional VPN backend crash test: pid=$($engine.ProcessId). Persistent router is retained."
+    Stop-Process -Id $engine.ProcessId -Force
     Check-Blocked 'Blocked during engine failure'
     $until=[DateTime]::UtcNow.AddSeconds($ConnectionTimeoutSeconds)
     do {

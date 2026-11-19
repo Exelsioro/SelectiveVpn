@@ -6,6 +6,16 @@ using SelectiveVpn.Core;
 using SelectiveVpn.Windows;
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
+if (args.Length == 2 && args[0] == "--live-routing-tun-check")
+{
+    await LiveTunCheck.RunAsync(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../")), args[1]);
+    return;
+}
+if (args.Length == 2 && args[0] == "--live-routing-check")
+{
+    await LiveRoutingCheck.RunAsync(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../")), args[1]);
+    return;
+}
 if (args.Length >= 2 && args[0] == "--guard-host")
 {
     using var hostGuard = new WfpGuard();

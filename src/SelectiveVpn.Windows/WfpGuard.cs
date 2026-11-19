@@ -46,8 +46,9 @@ public sealed class WfpGuard : IDisposable
 
     public void ReplaceProtectedApplications(IEnumerable<string> paths)
     {
-        CloseTunnel();
         var next = paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (Active && protectedPaths.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(next)) return;
+        CloseTunnel();
         Check(FwpmTransactionBegin0(persistent, 0));
         try
         {

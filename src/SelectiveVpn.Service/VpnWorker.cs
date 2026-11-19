@@ -15,6 +15,7 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
     private SecureStore store = null!;
     private WfpGuard guard = null!;
     private EngineProcess engine = null!;
+    private LiveRouter router = null!;
     private OpenVpnProcess transport = null!;
     private TunnelState state = TunnelState.Starting;
     private string message = "Запуск службы";
@@ -61,12 +62,15 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
         settings = store.LoadSettings();
         servers = ServerProfiles.Merge([], store.LoadServers(), settings.DeletedPlanetPools);
         using var localGuard = guard = new WfpGuard();
-        using var localEngine = engine = new EngineProcess(Path.Combine(AppContext.BaseDirectory, "runtime", "sing-box.exe"), store, Log);
+        using var localEngine = engine = new EngineProcess(Path.Combine(AppContext.BaseDirectory, "runtime", "sing-box.exe"),
+            new SecureStore(Path.Combine(store.Root, "vpn")), Log, store, flushDnsOnStop: false, diagnosticLogging: () => settings.DiagnosticLogging);
+        using var localRouter = router = new LiveRouter(Path.Combine(AppContext.BaseDirectory, "runtime", "sing-box.exe"),
+            new SecureStore(Path.Combine(store.Root, "routing")), store, Log, () => settings.DiagnosticLogging);
         using var localTransport = transport = new OpenVpnProcess(Path.Combine(AppContext.BaseDirectory, "runtime", "openvpn", "openvpn.exe"), store, Log);
         guard.ReplaceProtectedApplications(settings.ProtectedApplications);
         await HostNetwork.CleanupOnStartupAsync(Log, stoppingToken);
         stoppingToken.ThrowIfCancellationRequested();
-        await StartDisconnectedFilterAsync();
+        await ApplyRoutingAsync();
         stoppingToken.ThrowIfCancellationRequested();
         SetState(TunnelState.Disconnected, "VPN отключён. Защищённые приложения заблокированы.");
         if (settings.AutoConnect) QueueConnect();
@@ -76,7 +80,8 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
             connectionCancel?.Cancel();
             try { await connectionTask; } catch (OperationCanceledException) { }
             state = TunnelState.Stopping;
-            await StopNetworkAsync();
+            try { await StopVpnAsync(); }
+            finally { router.Stop(); await HostNetwork.CleanupOwnRoutesAsync(); }
             connectionCancel?.Dispose();
         }
     }
@@ -95,7 +100,7 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
                 if (request.Command == "status") response = new(true, Status: Snapshot());
                 else
                 {
-                    if (request.Command is "connect" or "disconnect" or "save" or "select-server" or "select-protocol") connectionCancel?.Cancel();
+                    if (request.Command is "connect" or "disconnect" or "select-server" or "select-protocol") connectionCancel?.Cancel();
                     await gate.WaitAsync(deadline.Token);
                     try { response = await HandleAsync(request, deadline.Token); }
                     catch (Exception ex) when (ex is not OperationCanceledException) { Log(ex.Message); response = new(false, ex.Message, Snapshot()); }
@@ -162,22 +167,35 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
                         throw new ArgumentException("Компоненты самого VPN нельзя направлять в туннель.");
                 }
                 next = Policy.Normalize(next);
-                guard.ReplaceProtectedApplications(settings.ProtectedApplications.Concat(next.ProtectedApplications));
-                store.SaveSettings(next); settings = next;
-                guard.ReplaceProtectedApplications(settings.ProtectedApplications);
-                if (requestedOnline) QueueConnect();
-                else
+                var previous = settings;
+                bool reconnect = requestedOnline && (next.SelectedServerId != previous.SelectedServerId || next.Protocol != previous.Protocol);
+                guard.ReplaceProtectedApplications(previous.ProtectedApplications.Concat(next.ProtectedApplications));
+                try
                 {
-                    if (disconnectedDomainFilter) await StopNetworkAsync();
-                    await StartDisconnectedFilterAsync();
+                    await router.ApplyAsync(next, requestedOnline, ct);
+                    store.SaveSettings(next);
+                    settings = next;
+                    guard.ReplaceProtectedApplications(settings.ProtectedApplications);
+                    if (state == TunnelState.Connected) guard.OpenTunnel(Wire.InterfaceName);
                 }
-                Log("Правила и протокол сохранены.");
+                catch
+                {
+                    await router.ApplyAsync(previous, requestedOnline, serviceToken);
+                    store.SaveSettings(previous);
+                    settings = previous;
+                    guard.ReplaceProtectedApplications(previous.ProtectedApplications);
+                    if (state == TunnelState.Connected) guard.OpenTunnel(Wire.InterfaceName);
+                    throw;
+                }
+                disconnectedDomainFilter = state != TunnelState.Connected && settings.NeedsDisconnectedDomainFilter;
+                if (reconnect) QueueConnect();
+                Log("Правила сохранены без перезапуска сетевого движка.");
                 break;
             case "connect": QueueConnect(); break;
             case "disconnect":
                 requestedOnline = false;
-                await StopNetworkAsync();
-                await StartDisconnectedFilterAsync();
+                await StopVpnAsync();
+                await ApplyRoutingAsync();
                 SetState(TunnelState.Disconnected, "VPN отключён. Защищённые приложения заблокированы.");
                 break;
             default: throw new ArgumentException("Неизвестная команда.");
@@ -221,8 +239,8 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
         if (disconnect)
         {
             requestedOnline = false;
-            await StopNetworkAsync();
-            await StartDisconnectedFilterAsync();
+            await StopVpnAsync();
+            await ApplyRoutingAsync();
             SetState(TunnelState.Disconnected, "VPN отключён: активный сервер удалён.");
         }
         Log("Сервер удалён.");
@@ -235,22 +253,22 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
         var token = connectionCancel.Token;
         if (successfulConnections > 0) reconnectAttempts++;
         requestedOnline = true;
-        SetState(TunnelState.Connecting, "Подбор и проверка подключения; сеть ещё не переключена");
+        SetState(TunnelState.Connecting, "Подбор и проверка VPN. Прямые соединения сохраняются.");
         connectionTask = Task.Run(async () =>
         {
             await gate.WaitAsync(token);
             try { await ConnectAsync(token); }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                await StopNetworkAsync();
-                await StartDisconnectedFilterAsync();
+                await StopVpnAsync();
+                await ApplyRoutingAsync();
                 SetState(TunnelState.Disconnected, "Подключение отменено.");
             }
             catch (Exception ex)
             {
                 Failure(ex.Message);
-                await StopNetworkAsync();
-                await StartDisconnectedFilterAsync();
+                await StopVpnAsync();
+                await ApplyRoutingAsync();
                 retryAt = DateTime.UtcNow.AddSeconds(60);
                 SetState(TunnelState.Faulted, ex.Message);
             }
@@ -260,7 +278,7 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
 
     private async Task ConnectAsync(CancellationToken ct)
     {
-        if (!disconnectedDomainFilter) await StopNetworkAsync();
+        await StopVpnAsync();
         HostNetwork.RejectConflictingVpn();
         var physical = await HostNetwork.GetPhysicalAsync(ct);
         var directIPv6Available = await CheckDirectIPv6Async(physical, ct);
@@ -269,7 +287,8 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
             : servers.Where(s => s.Id == settings.SelectedServerId).ToArray();
         if (candidates.Length == 0) throw new InvalidOperationException("Список серверов пуст. Нажмите «Обновить серверы».");
         if (settings.Protocol != VpnProtocol.Auto && candidates.All(s => !s.Protocols.Contains(settings.Protocol))) throw new InvalidOperationException("Выбранный протокол отсутствует в конфигурации сервера. Выберите другой протокол или «Авто».");
-        if (disconnectedDomainFilter) await StopNetworkAsync();
+        await router.EnsureAsync(settings, requestedOnline, physical.Name, directIPv6Available, ct);
+        await router.ApplyAsync(settings, requestedOnline, ct);
         foreach (var server in candidates)
         {
             var protocols = settings.Protocol == VpnProtocol.Auto
@@ -284,12 +303,11 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
                     string? vpnInterface = null;
                     if (protocol is not (VpnProtocol.VlessReality or VpnProtocol.WireGuard))
                     { await transport.StartAsync(server, protocol, physical, ct); vpnInterface = OpenVpnProcess.InterfaceName; }
-                    await engine.StartAsync(settings, server, true, ct, tun: false, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available, protocol: protocol);
+                    await engine.StartAsync(settings with { DiagnosticLogging = true }, server, true, ct, tun: false, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available, protocol: protocol, fixedProbe: router.VpnEndpoint);
                     if (!await engine.ProbeAsync(ct)) throw new IOException("HTTPS через VPN недоступен.");
-                    await engine.StartAsync(settings, server, true, ct, tun: true, physicalInterface: physical.Name, vpnInterface: vpnInterface, directIPv6Available: directIPv6Available, protocol: protocol);
-                    if (!await engine.ProbeAsync(ct)) throw new IOException("Проверка после запуска TUN не прошла.");
                     guard.OpenTunnel(Wire.InterfaceName); activeProtocol = protocol;
                     activeServerId = server.Id;
+                    disconnectedDomainFilter = false;
                     consecutiveProbeFailures = 0;
                     connectedSince = DateTimeOffset.UtcNow;
                     connectedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -300,10 +318,10 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
                     SetState(TunnelState.Connected, $"Подключено: {server.Name} · {protocol}"); return;
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
-                { Failure($"{server.Name} / {protocol}: {EngineProcess.SafeError(ex.Message, server)}"); await StopNetworkAsync(); }
+                { Failure($"{server.Name} / {protocol}: {EngineProcess.SafeError(ex.Message, server)}"); await StopVpnAsync(); }
             }
         }
-        throw new IOException("Серверы и протоколы не прошли проверку. Сеть восстановлена; защищённые приложения заблокированы. Причины — в журнале ниже.");
+        throw new IOException("Серверы и протоколы не прошли проверку. Прямые соединения продолжают работать; VPN-трафик заблокирован. Причины — в журнале ниже.");
     }
 
     private async Task<bool> CheckDirectIPv6Async(PhysicalNetwork physical, CancellationToken ct)
@@ -313,38 +331,30 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
         return available;
     }
 
-    private async Task StartDisconnectedFilterAsync()
+    private async Task ApplyRoutingAsync()
     {
-        if (!settings.NeedsDisconnectedDomainFilter || serviceToken.IsCancellationRequested) return;
-        try
+        if (serviceToken.IsCancellationRequested) return;
+        if (!router.Running)
         {
             HostNetwork.RejectConflictingVpn();
             var physical = await HostNetwork.GetPhysicalAsync(serviceToken);
-            // Only explicit VPN rules block traffic here. Unmatched traffic remains direct.
-            var offlineSettings = settings with { DefaultRoute = RouteTarget.Direct };
-            var directIPv6Available = await CheckDirectIPv6Async(physical, serviceToken);
-            await engine.StartAsync(offlineSettings, null, false, serviceToken, physicalInterface: physical.Name, directIPv6Available: directIPv6Available);
-            disconnectedDomainFilter = true;
-            Log("Фильтр VPN-доменов запущен без туннеля.");
+            bool ipv6 = await CheckDirectIPv6Async(physical, serviceToken);
+            await router.EnsureAsync(settings, requestedOnline, physical.Name, ipv6, serviceToken);
         }
-        catch (OperationCanceledException) when (serviceToken.IsCancellationRequested) { }
-        catch (Exception ex)
-        {
-            Log("Не удалось запустить фильтр VPN-доменов: " + ex.Message);
-            try { await StopNetworkAsync(); }
-            catch (Exception cleanup) { Log("Не удалось очистить маршруты фильтра: " + cleanup.Message); }
-        }
+        await router.ApplyAsync(settings, requestedOnline, serviceToken);
+        disconnectedDomainFilter = state != TunnelState.Connected && settings.NeedsDisconnectedDomainFilter;
     }
 
-    private async Task StopNetworkAsync()
+    private Task StopVpnAsync()
     {
         disconnectedDomainFilter = false;
         consecutiveProbeFailures = 0;
         activeServerId = null;
         guard.CloseTunnel();
-        if (connectedSince is not null) { totalConnectedSeconds += System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds; connectedSince=null; }
+        if (connectedSince is not null) { totalConnectedSeconds += System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds; connectedSince = null; }
         try { engine.Stop(); }
-        finally { try { transport.Stop(); } finally { await HostNetwork.CleanupOwnRoutesAsync(); } }
+        finally { transport.Stop(); }
+        return Task.CompletedTask;
     }
 
     private async Task MonitorAsync(CancellationToken ct)
@@ -355,6 +365,12 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
             if (!await gate.WaitAsync(0, ct)) continue;
             try
             {
+                if (!router.Running)
+                {
+                    Log("Постоянный маршрутизатор завершился. Восстановление TUN после сбоя процесса.");
+                    await ApplyRoutingAsync();
+                    if (state == TunnelState.Connected) guard.OpenTunnel(Wire.InterfaceName);
+                }
                 string? failure = null;
                 if (state == TunnelState.Connected)
                 {
@@ -376,22 +392,13 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
                 if (failure is not null)
                 {
                     Failure($"Сервер {activeServerId}, {activeProtocol}: {failure}");
-                    await StopNetworkAsync();
-                    await StartDisconnectedFilterAsync();
+                    await StopVpnAsync();
+                    await ApplyRoutingAsync();
                     retryAt = DateTime.UtcNow.AddSeconds(30);
                     SetState(TunnelState.Faulted, "Соединение потеряно. Защищённые приложения заблокированы.");
                 }
                 else if (state == TunnelState.Faulted && requestedOnline && DateTime.UtcNow >= retryAt) QueueConnect();
-                else if (state is TunnelState.Disconnected or TunnelState.Faulted &&
-                    settings.NeedsDisconnectedDomainFilter && (!disconnectedDomainFilter || !engine.Running))
-                {
-                    if (disconnectedDomainFilter)
-                    {
-                        Log("Движок фильтра VPN-доменов завершился. Перезапуск.");
-                        await StopNetworkAsync();
-                    }
-                    await StartDisconnectedFilterAsync();
-                }
+
             }
             finally { gate.Release(); }
         }
