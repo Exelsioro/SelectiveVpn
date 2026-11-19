@@ -176,6 +176,15 @@ diagnostics.Flush();
 diagnostics.Flush();
 Check(notices.Count == 3 && notices[2].Contains("utweb.exe: 500", StringComparison.Ordinal),
     "direct TCP timeouts produce one summary with the originating process");
+const string emptyLookup = "ERROR [8 1ms] connection: open connection to ipv6.example.test:80 using outbound/direct[direct]: lookup ipv6.example.test: empty result";
+for (int i = 0; i < 100; i++) diagnostics.Record(timestamp + emptyLookup);
+Check(notices.Count == 3, "repeated empty direct DNS answers do not flood service events");
+diagnostics.Flush();
+diagnostics.Flush();
+Check(notices.Count == 4 && notices[3].Contains("100", StringComparison.Ordinal),
+    "empty direct DNS answers produce one counted summary");
+diagnostics.Record(timestamp + emptyLookup.Replace("direct[direct]", "direct[vpn]", StringComparison.Ordinal));
+Check(notices.Count == 5, "VPN DNS failures remain visible immediately");
 var probe = new ProbeEndpoint(19080, "test", "test-password");
 var offline = EngineConfig.Build(settings, null, false, probe);
 var online = EngineConfig.Build(settings, sample, true, probe);

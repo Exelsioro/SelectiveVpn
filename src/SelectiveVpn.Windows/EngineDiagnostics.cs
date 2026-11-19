@@ -13,6 +13,7 @@ internal sealed partial class EngineDiagnostics(Action<string> publish)
     private readonly Queue<string> processOrder = new();
     private readonly Dictionary<string, long> directTimeouts = new(StringComparer.OrdinalIgnoreCase);
     private long otherTimeouts;
+    private long directDnsEmpty;
 
     public bool Record(string line)
     {
@@ -36,6 +37,12 @@ internal sealed partial class EngineDiagnostics(Action<string> publish)
             return false;
         }
         if (level is not ("ERROR" or "FATAL")) return false;
+        if (level == "ERROR" && body.Contains("using outbound/direct[direct]: lookup ", StringComparison.Ordinal)
+            && body.EndsWith(": empty result", StringComparison.Ordinal))
+        {
+            lock (gate) directDnsEmpty++;
+            return false;
+        }
 
         if (level == "ERROR" && body.Contains("using outbound/direct[direct]: dial tcp ", StringComparison.Ordinal)
             && body.EndsWith(": i/o timeout", StringComparison.Ordinal))
@@ -56,6 +63,15 @@ internal sealed partial class EngineDiagnostics(Action<string> publish)
 
     public void Flush(bool final = false)
     {
+        string period = final ? "перед остановкой движка" : "за минуту";
+        long dnsEmpty;
+        lock (gate)
+        {
+            dnsEmpty = directDnsEmpty;
+            directDnsEmpty = 0;
+        }
+        if (dnsEmpty > 0)
+            publish($"Прямой DNS {period}: {dnsEmpty} ответов без адреса. Подробности в engine.log.");
         string message;
         lock (gate)
         {
@@ -67,7 +83,7 @@ internal sealed partial class EngineDiagnostics(Action<string> publish)
             if (remaining > 0) groups.Add($"прочие: {remaining}");
             directTimeouts.Clear();
             otherTimeouts = 0;
-            string period = final ? "перед остановкой движка" : "за минуту";
+
             message = $"Таймауты прямых TCP-соединений {period}: {total} ({string.Join(", ", groups)}). Подробности в engine.log.";
         }
         publish(message);

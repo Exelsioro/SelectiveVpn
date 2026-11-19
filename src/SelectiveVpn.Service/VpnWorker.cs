@@ -24,6 +24,7 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
     private bool requestedOnline;
     private volatile bool disconnectedDomainFilter;
     private VpnProtocol activeProtocol;
+    private int consecutiveProbeFailures;
     private DateTime retryAt;
     private DateTimeOffset? connectedSince, lastReconnectedAt, lastFailureAt;
     private string? lastFailure;
@@ -289,6 +290,7 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
                     if (!await engine.ProbeAsync(ct)) throw new IOException("Проверка после запуска TUN не прошла.");
                     guard.OpenTunnel(Wire.InterfaceName); activeProtocol = protocol;
                     activeServerId = server.Id;
+                    consecutiveProbeFailures = 0;
                     connectedSince = DateTimeOffset.UtcNow;
                     connectedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
                     if (successfulConnections > 0) lastReconnectedAt = connectedSince;
@@ -337,6 +339,7 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
     private async Task StopNetworkAsync()
     {
         disconnectedDomainFilter = false;
+        consecutiveProbeFailures = 0;
         activeServerId = null;
         guard.CloseTunnel();
         if (connectedSince is not null) { totalConnectedSeconds += System.Diagnostics.Stopwatch.GetElapsedTime(connectedTimestamp).TotalSeconds; connectedSince=null; }
@@ -352,9 +355,27 @@ public sealed class VpnWorker(ILogger<VpnWorker> logger) : BackgroundService
             if (!await gate.WaitAsync(0, ct)) continue;
             try
             {
-                if (state == TunnelState.Connected && (!engine.Running || (activeProtocol is not (VpnProtocol.VlessReality or VpnProtocol.WireGuard) && !transport.Running) || !await engine.ProbeAsync(ct)))
+                string? failure = null;
+                if (state == TunnelState.Connected)
                 {
-                    Failure("Проверка доступности или процесс VPN завершились с ошибкой");
+                    if (!engine.Running) failure = "Процесс сетевого движка завершился.";
+                    else if (activeProtocol is not (VpnProtocol.VlessReality or VpnProtocol.WireGuard) && !transport.Running)
+                        failure = "Процесс OpenVPN завершился.";
+                    else if (await engine.ProbeAsync(ct))
+                    {
+                        if (consecutiveProbeFailures > 0) Log("Проверка VPN восстановилась без переподключения.");
+                        consecutiveProbeFailures = 0;
+                    }
+                    else
+                    {
+                        consecutiveProbeFailures++;
+                        Log($"Проверка VPN {consecutiveProbeFailures}/3, сервер {activeServerId}, {activeProtocol}: {engine.LastProbeFailure}");
+                        if (consecutiveProbeFailures >= 3) failure = engine.LastProbeFailure;
+                    }
+                }
+                if (failure is not null)
+                {
+                    Failure($"Сервер {activeServerId}, {activeProtocol}: {failure}");
                     await StopNetworkAsync();
                     await StartDisconnectedFilterAsync();
                     retryAt = DateTime.UtcNow.AddSeconds(30);

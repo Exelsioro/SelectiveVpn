@@ -23,6 +23,7 @@ public sealed class EngineProcess : IDisposable
     private Timer? diagnosticsTimer;
     private volatile string lastError = "";
     public bool Running => process is { HasExited: false };
+    public string LastProbeFailure { get; private set; } = "";
 
     public EngineProcess(string executable, SecureStore store, Action<string> log)
     { this.executable = executable; this.store = store; this.log = log; }
@@ -93,7 +94,12 @@ public sealed class EngineProcess : IDisposable
 
     public async Task<bool> ProbeAsync(CancellationToken ct)
     {
-        if (!Running || probe is null) return false;
+        LastProbeFailure = "";
+        if (!Running || probe is null)
+        {
+            LastProbeFailure = "Сетевой движок или канал проверки недоступен.";
+            return false;
+        }
         using var handler = new SocketsHttpHandler
         {
             Proxy = new WebProxy($"socks5://127.0.0.1:{probe.Port}") { Credentials = new NetworkCredential(probe.Username, probe.Password) },
@@ -103,9 +109,16 @@ public sealed class EngineProcess : IDisposable
         try
         {
             using var response = await client.GetAsync("https://www.cloudflare.com/cdn-cgi/trace", HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!response.IsSuccessStatusCode)
+                LastProbeFailure = $"HTTPS-проверка www.cloudflare.com: HTTP {(int)response.StatusCode}.";
             return response.IsSuccessStatusCode;
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException) { return false; }
+        catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or OperationCanceledException)
+        {
+            LastProbeFailure = ex is OperationCanceledException ? "HTTPS-проверка www.cloudflare.com: таймаут 8 секунд."
+                : "HTTPS-проверка www.cloudflare.com: " + ex.Message;
+            return false;
+        }
     }
 
     private ProcessStartInfo StartInfo(string command, string config)
