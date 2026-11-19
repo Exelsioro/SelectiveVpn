@@ -11,6 +11,8 @@ internal sealed partial class EngineDiagnostics(Action<string> publish)
     private readonly object gate = new();
     private readonly Dictionary<string, string> processes = new();
     private readonly Queue<string> processOrder = new();
+    private readonly Dictionary<string, (bool Direct, bool Reported)> resolutions = new();
+    private readonly Queue<string> resolutionOrder = new();
     private readonly Dictionary<string, long> directTimeouts = new(StringComparer.OrdinalIgnoreCase);
     private long otherTimeouts;
     private long directDnsEmpty;
@@ -36,7 +38,35 @@ internal sealed partial class EngineDiagnostics(Action<string> publish)
             }
             return false;
         }
+        if (level == "DEBUG" && id.Length > 0 && body.StartsWith("router: match", StringComparison.Ordinal)
+            && body.Contains("=> resolve(", StringComparison.Ordinal))
+        {
+            lock (gate)
+            {
+                if (!resolutions.ContainsKey(id))
+                {
+                    if (resolutionOrder.Count == ProcessHistoryLimit) resolutions.Remove(resolutionOrder.Dequeue());
+                    resolutionOrder.Enqueue(id);
+                }
+                resolutions[id] = (body.Contains("=> resolve(dns-direct,", StringComparison.Ordinal), false);
+            }
+            return false;
+        }
         if (level is not ("ERROR" or "FATAL")) return false;
+        if (level == "ERROR" && body.EndsWith(": empty result", StringComparison.Ordinal)
+            && (body.StartsWith("dns: lookup failed for ", StringComparison.Ordinal)
+                || body.StartsWith("router: lookup ", StringComparison.Ordinal)))
+        {
+            lock (gate)
+            {
+                if (resolutions.TryGetValue(id, out var resolution) && resolution.Direct)
+                {
+                    if (!resolution.Reported) directDnsEmpty++;
+                    resolutions[id] = (true, true);
+                    return false;
+                }
+            }
+        }
         if (level == "ERROR" && body.Contains("using outbound/direct[direct]: lookup ", StringComparison.Ordinal)
             && body.EndsWith(": empty result", StringComparison.Ordinal))
         {
@@ -89,7 +119,7 @@ internal sealed partial class EngineDiagnostics(Action<string> publish)
         publish(message);
     }
 
-    [GeneratedRegex(@"^(?:[+-]\d{4} \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} )?(?<level>INFO|ERROR|FATAL)(?:\[\d+\])? +(?:\[(?<id>\d+) [^\]]+\] )?(?<body>.*)$",
+    [GeneratedRegex(@"^(?:[+-]\d{4} \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} )?(?<level>DEBUG|INFO|ERROR|FATAL)(?:\[\d+\])? +(?:\[(?<id>\d+) [^\]]+\] )?(?<body>.*)$",
         RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture)]
     private static partial Regex EngineLine();
 }

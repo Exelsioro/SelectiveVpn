@@ -195,6 +195,25 @@ Check(notices.Count == 4 && notices[3].Contains("100", StringComparison.Ordinal)
     "empty direct DNS answers produce one counted summary");
 diagnostics.Record(timestamp + emptyLookup.Replace("direct[direct]", "direct[vpn]", StringComparison.Ordinal));
 Check(notices.Count == 5, "VPN DNS failures remain visible immediately");
+var resolverNotices = new List<string>();
+var resolverDiagnostics = new EngineDiagnostics(resolverNotices.Add);
+resolverDiagnostics.Record(timestamp + "DEBUG [501 1ms] router: match[7] domain_regex=.+ && !(rule_set=resolve-vpn) => resolve(dns-direct,ipv4_only)");
+resolverDiagnostics.Record(timestamp + "ERROR [501 1ms] dns: lookup failed for ipv6.example.test: empty result");
+resolverDiagnostics.Record(timestamp + "ERROR [501 1ms] router: lookup ipv6.example.test: empty result");
+Check(resolverNotices.Count == 0, "new DNS/router formats are summarized only for confirmed direct resolution");
+resolverDiagnostics.Flush();
+resolverDiagnostics.Flush();
+Check(resolverNotices.Count == 1 && resolverNotices[0].Contains(": 1 ", StringComparison.Ordinal),
+    "DNS and router reports for one failed lookup count as one request");
+resolverDiagnostics.Record(timestamp + "DEBUG [502 1ms] router: match[6] rule_set=resolve-vpn => resolve(dns-vpn,prefer_ipv4)");
+resolverDiagnostics.Record(timestamp + "ERROR [502 1ms] dns: lookup failed for example.test: empty result");
+resolverDiagnostics.Record(timestamp + "ERROR [502 1ms] router: lookup example.test: empty result");
+Check(resolverNotices.Count == 3, "VPN empty DNS results remain visible in both new formats");
+resolverDiagnostics.Record(timestamp + "ERROR [503 1ms] dns: lookup failed for unknown.test: empty result");
+Check(resolverNotices.Count == 4, "DNS failures with no known route remain visible");
+resolverDiagnostics.Record(timestamp + "DEBUG [504 1ms] router: match[7] domain_regex=.+ && !(rule_set=resolve-vpn) => resolve(dns-direct,ipv4_only)");
+resolverDiagnostics.Record(timestamp + "ERROR [504 1ms] router: lookup example.test: SERVFAIL");
+Check(resolverNotices.Count == 5, "real direct DNS server failures remain visible");
 var probe = new ProbeEndpoint(19080, "test", "test-password");
 var offline = EngineConfig.Build(settings, null, false, probe);
 var online = EngineConfig.Build(settings, sample, true, probe);

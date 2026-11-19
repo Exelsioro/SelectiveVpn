@@ -78,9 +78,13 @@ public sealed class EngineProcess : IDisposable
             DataReceivedEventHandler receive = (_, e) =>
             {
                 if (string.IsNullOrWhiteSpace(e.Data)) return;
-                if (diagnosticLogging is not null && !diagnosticLogging() && e.Data.Contains(" DEBUG ", StringComparison.Ordinal)) return;
                 var line = SafeError(e.Data, server);
                 if (probe is not null) line = line.Replace(probe.Password, "<credential>", StringComparison.Ordinal);
+                if (diagnosticLogging is not null && !diagnosticLogging() && line.Contains(" DEBUG ", StringComparison.Ordinal))
+                {
+                    sessionDiagnostics.Record(line);
+                    return;
+                }
                 try { logStore.AppendLog("engine.log", line); } catch (IOException) { }
                 if (sessionDiagnostics.Record(line)) lastError = line;
             };
