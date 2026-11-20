@@ -27,13 +27,19 @@ function Invoke-Control([string]$Command) {
     $reply.status
 }
 
-function Wait-Control([datetime]$Deadline = [DateTime]::UtcNow.AddSeconds(100)) {
+function Wait-Control([datetime]$Deadline = [DateTime]::UtcNow.AddSeconds(150), [switch]$WaitForStartup) {
     do {
-        try { return (Invoke-Control 'status') }
+        $result = $null
+        try { $result = Invoke-Control 'status' }
         catch {
-            if ([DateTime]::UtcNow -ge $deadline -or (Get-Service SelectiveVpn).Status -eq 'Stopped') { throw }
-            Start-Sleep -Milliseconds 750
+            if ($_.Exception.GetBaseException() -isnot [TimeoutException]) { throw }
+            if ([DateTime]::UtcNow -ge $Deadline -or (Get-Service SelectiveVpn).Status -eq 'Stopped') {
+                throw "The SelectiveVpn service did not answer the local status request. $($_.Exception.GetBaseException().Message)"
+            }
         }
+        if ($result -and (!$WaitForStartup -or $result.state -ne 'Starting')) { return $result }
+        if ([DateTime]::UtcNow -ge $Deadline) { throw "The SelectiveVpn service did not finish startup. $($result.message)" }
+        Start-Sleep -Milliseconds 750
     } while ($true)
 }
 
@@ -47,15 +53,24 @@ function Stop-VpnService {
 
 function Start-VpnService([bool]$Reconnect) {
     Start-Service SelectiveVpn
-    $result = Wait-Control
-    if (!$Reconnect) { return }
-    if ($result.state -notin @('Connected','Connecting')) { $result = Invoke-Control 'connect' }
-    $deadline = [DateTime]::UtcNow.AddSeconds(120)
-    while ($result.state -ne 'Connected') {
-        if ($result.state -eq 'Faulted') { throw "VPN reconnection failed: $($result.message)" }
-        if ([DateTime]::UtcNow -ge $deadline) { throw 'VPN reconnection timed out.' }
-        Start-Sleep -Seconds 2
-        $result = Wait-Control $deadline
+    $result = Wait-Control -WaitForStartup
+    Write-Host "Local service responded. State: $($result.state). $($result.message)"
+    if (!$Reconnect -or $result.state -eq 'Connected') { return }
+
+    try {
+        if ($result.state -ne 'Connecting' -and !$result.connection.nextRetryAt) {
+            $result = Invoke-Control 'connect'
+        }
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        while ($result.state -eq 'Connecting' -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Seconds 2
+            $result = Wait-Control $deadline
+        }
+        if ($result.state -ne 'Connected') {
+            Write-Warning "VPN connection is not ready. Open SelectiveVpn to check the connection status. $($result.message)"
+        }
+    } catch {
+        Write-Warning "VPN connection could not be verified. Open SelectiveVpn to check the connection status. $($_.Exception.Message)"
     }
 }
 
@@ -92,9 +107,14 @@ try {
     $wasRunning = $existing -and $existing.State -in @('Running','Start Pending')
     $reconnect = $false
     if ($wasRunning) {
-        $before = Wait-Control
-        $reconnect = $before.state -in @('Connected','Connecting') -or
-            ($before.state -eq 'Faulted' -and $null -ne $before.connection.nextRetryAt)
+        try {
+            $before = Invoke-Control 'status'
+            $reconnect = $before.state -in @('Connected','Connecting') -or
+                ($before.state -eq 'Faulted' -and $null -ne $before.connection.nextRetryAt)
+        } catch {
+            if ($_.Exception.GetBaseException() -isnot [TimeoutException]) { throw }
+            Write-Warning 'The old service did not answer. Continuing with the update. Saved autoconnect settings still apply.'
+        }
     }
     $serviceTouched = $true
     Stop-VpnService
@@ -153,10 +173,13 @@ try {
             foreach ($component in $moved) {
                 Move-Item -LiteralPath (Join-Path $backup $component) -Destination (Join-Path $target $component)
             }
-            if ($wasRunning) { Start-VpnService $reconnect }
-            Write-Warning 'Previous installation restored.'
+            Write-Warning 'Previous application files restored.'
+            if ($wasRunning) {
+                try { Start-VpnService $reconnect }
+                catch { Write-Warning ("Restored service did not become ready: " + $_.Exception.Message) }
+            }
         } catch {
-            Write-Warning ("Rollback incomplete. Backup: $backup. " + $_.Exception.Message)
+            Write-Warning ("Could not restore application files. Backup: $backup. " + $_.Exception.Message)
         }
     }
     throw $failure
